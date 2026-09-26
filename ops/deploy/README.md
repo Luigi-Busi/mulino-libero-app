@@ -18,7 +18,8 @@ Preparare e verificare un nuovo tag, senza sostituire il container attivo:
 mulino-deploy check v1.0.1
 ```
 
-`v1.0.1` e un esempio: deve esistere ed essere pubblicato su `origin`.
+`v1.0.1` e la prima release che include questi strumenti. Per release successive
+usare il tag corrispondente, che deve essere pubblicato su `origin`.
 Preparare le modifiche in una copia di sviluppo separata del repository, quindi
 pubblicare commit e tag. Lasciare pulito il checkout in produzione.
 Il comando recupera quel tag, verifica che corrisponda al tag locale, costruisce
