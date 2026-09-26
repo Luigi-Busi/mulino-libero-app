@@ -340,13 +340,17 @@ class Manager:
             with contextlib.suppress(Failure):
                 self.run(['docker', 'rm', '-f', name])
 
+    def image_files(self, source):
+        optional = ('runtime_health.py',) if (source / 'runtime_health.py').is_file() else ()
+        return self.c.image_files + optional
+
     def verify_image(self, record, source):
         output = self.run(['docker', 'run', '--rm', '--network', 'none', '--read-only',
                            '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges',
                            '--entrypoint', 'sha256sum', record['image'],
-                           *('/app/' + name for name in self.c.image_files)])
+                           *('/app/' + name for name in self.image_files(source))])
         actual = dict(line.split(maxsplit=1)[::-1] for line in output.splitlines())
-        for name in self.c.image_files:
+        for name in self.image_files(source):
             if actual.get('/app/' + name) != digest(source / name):
                 raise Failure('L immagine costruita non contiene il codice del tag: ' + name)
 
@@ -386,7 +390,7 @@ class Manager:
         record = {'tag': tag, 'sha': sha, 'image': container['Image'],
                   'image_tag': self.c.image_repo + ':' + sha,
                   'branch': self.git('branch', '--show-current')}
-        for name in self.c.image_files:
+        for name in self.image_files(source):
             actual = self.run(['docker', 'exec', container['Id'], 'sha256sum', '/app/' + name]).split()[0]
             if actual != digest(source / name):
                 raise Failure('Il codice in esecuzione non coincide con Git: ' + name)

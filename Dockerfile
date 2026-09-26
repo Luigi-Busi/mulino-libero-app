@@ -26,6 +26,7 @@ RUN python -m pip install --no-cache-dir -r /app/requirements.txt \
     && python -m pip check
 
 COPY libero_mail_bot.py /app/libero_mail_bot.py
+COPY runtime_health.py /app/runtime_health.py
 COPY start.sh /app/start.sh
 
 RUN chmod 0755 /app/start.sh \

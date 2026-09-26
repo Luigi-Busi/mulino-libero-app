@@ -1,0 +1,17 @@
+[Unit]
+Description=Mulino Libero - verifica indipendente e segnale Healthchecks
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /usr/local/lib/mulino-monitor/monitor.py
+TimeoutStartSec=90
+UMask=0077
+StateDirectory=mulino-monitor
+StateDirectoryMode=0700
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/mulino-monitor
+PrivateTmp=yes

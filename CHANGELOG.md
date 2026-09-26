@@ -1,5 +1,15 @@
 # Modifiche di Mulino Libero
 
+## v1.1.0 - 26 settembre 2026
+
+- Monitoraggio indipendente di bot, browser, disco e backup con Healthchecks.
+- Segnali temporanei dei cicli dei bot, senza richieste Telegram aggiuntive.
+- Ricevuta della copia PC solo dopo verifica degli archivi cifrati.
+- Avvisi privati Telegram, conferma di guasto/rientro e guida alla manutenzione.
+- Compatibilita del deploy con la nuova libreria e con i tag precedenti.
+
+Nessuna migrazione dei dati. Procedura e limiti in ops/monitoring/README.md.
+
 ## v1.0.2 — 26 settembre 2026
 
 - Le schermate non riconosciute durante la registrazione lasciano aperto il

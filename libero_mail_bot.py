@@ -39,6 +39,7 @@ from urllib.parse import urlsplit, urlunsplit
 from zipfile import ZipFile, ZIP_DEFLATED
 
 import gspread
+from runtime_health import HealthRequest, RuntimeHealth
 from dotenv import load_dotenv
 from gspread.utils import rowcol_to_a1
 from playwright.async_api import (
@@ -639,6 +640,7 @@ class RegistrationBrowser:
                 viewport={"width": 1365, "height": 900},
             )
             self.page = await self.context.new_page()
+            self.coordinator.monitor_browser = self
 
             try:
                 self.stage = "apertura della pagina Libero"
@@ -661,6 +663,7 @@ class RegistrationBrowser:
                     f"Tempo scaduto durante: {self.stage}."
                 ) from None
             finally:
+                self.coordinator.monitor_browser = None
                 # Un contesto nuovo per ogni account garantisce la rimozione di
                 # cookie, cache, local storage e cronologia fra le registrazioni.
                 if self.context:
@@ -2204,6 +2207,33 @@ class Coordinator:
         self.backup_task: Optional[asyncio.Task] = None
         self.backup_error = False
         self.backup_notice_at = float("-inf")
+        self.health = RuntimeHealth('mugnaio', '/tmp/mulino-health/status.json')
+        self.health.snapshot = self.health_snapshot
+        self.last_queue_ok = None
+        self.monitor_browser: Optional[RegistrationBrowser] = None
+
+    async def health_snapshot(self) -> dict[str, bool]:
+        session = self.monitor_browser
+        expected = session is not None
+        browser_ok = True
+        if session is not None:
+            try:
+                browser_ok = bool(session.browser and session.browser.is_connected()
+                                  and session.page and not session.page.is_closed())
+                if browser_ok:
+                    await asyncio.wait_for(session.page.title(), timeout=5)
+            except Exception:
+                browser_ok = False
+        queue_task = self.application.bot_data.get('queue_task') if self.application else None
+        queue_ok = bool(queue_task and not queue_task.done() and self.last_queue_ok is not None
+                        and 0 <= time.monotonic() - self.last_queue_ok
+                        < max(180, getattr(self.settings, 'poll_seconds', 10) * 3))
+        waiting = any(future is not None and not future.done() for future in
+                      (self.personal_future, self.phone_future, self.otp_future,
+                       self.captcha_future, self.final_future)) or self.outcome_review is not None
+        return dict(paused=bool(self.paused), busy=self.registration_busy(),
+                    human_wait=bool(waiting), queue_ok=queue_ok,
+                    browser_expected=expected, browser_ok=browser_ok)
 
     def persist_before_backup(self) -> None:
         # La connessione SQLite del coordinator rimane nel thread principale.
@@ -2386,6 +2416,7 @@ class Coordinator:
                         if request.request_id in self.outcomes.ids():
                             if self.outcomes.get(request.request_id)[3]:
                                 await self.sync_outcome(request.request_id, force=True)
+                            self.last_queue_ok = time.monotonic()
                             await asyncio.sleep(self.settings.poll_seconds)
                             continue
                         self.processing_task = asyncio.create_task(
@@ -2394,6 +2425,7 @@ class Coordinator:
                         )
                 await asyncio.sleep(self.settings.poll_seconds)
                 await self.messages.drain(self.bot)
+                self.last_queue_ok = time.monotonic()
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -3650,12 +3682,14 @@ async def post_init(application: Application) -> None:
             ),
         )
     application.bot_data["queue_task"] = asyncio.create_task(coordinator.loop())
+    await coordinator.health.start(application)
     if coordinator.backups is not None:
         application.bot_data["backup_loop_task"] = asyncio.create_task(coordinator.backup_loop())
     LOGGER.info("Bot avviato; coda %s", "in pausa" if coordinator.paused else "attiva")
 
 
 async def post_shutdown(application: Application) -> None:
+    await application.bot_data['coordinator'].health.stop(application)
     task = application.bot_data.get("queue_task")
     if task:
         task.cancel()
@@ -3752,6 +3786,7 @@ def main() -> None:
     application = (
         Application.builder()
         .token(settings.telegram_token)
+        .get_updates_request(HealthRequest(coordinator.health))
         .post_init(post_init)
         .post_shutdown(post_shutdown)
         .concurrent_updates(False)

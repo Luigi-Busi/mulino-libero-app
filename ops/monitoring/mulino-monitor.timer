@@ -1,0 +1,10 @@
+[Unit]
+Description=Mulino Libero - controllo ogni due minuti
+
+[Timer]
+OnBootSec=2min
+OnUnitInactiveSec=2min
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target
