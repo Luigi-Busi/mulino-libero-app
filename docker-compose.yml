@@ -1,0 +1,52 @@
+name: mulino-libero
+
+services:
+  libero-mail-bot:
+    build: .
+    container_name: libero-mail-bot
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 30s
+    shm_size: 256mb
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    env_file:
+      - ../.env
+    environment:
+      TELEGRAM_BOT_TOKEN_FILE: /run/secrets/telegram-bot-token
+      LIBERO_PASSWORD_FILE: /run/secrets/libero-password
+      GOOGLE_SERVICE_ACCOUNT_FILE: /run/secrets/google-service-account.json
+      VNC_PASSWORD_FILE: /run/secrets/vnc-password
+      REMOTE_BROWSER_URL: http://127.0.0.1:6080/vnc.html
+    secrets:
+      - source: google_service_account
+        target: google-service-account.json
+      - source: telegram_bot_token
+        target: telegram-bot-token
+      - source: libero_password
+        target: libero-password
+      - source: vnc_password
+        target: vnc-password
+    volumes:
+      - ../data:/data
+    # noVNC resta raggiungibile soltanto dal server stesso.
+    # Non esporlo direttamente su Internet: usa un tunnel privato/VPN.
+    ports:
+      - "127.0.0.1:6080:6080"
+    logging:
+      driver: json-file
+      options:
+        max-size: 5m
+        max-file: "3"
+
+secrets:
+  google_service_account:
+    file: ../secrets/google-service-account.json
+  telegram_bot_token:
+    file: ../secrets/telegram-bot-token
+  libero_password:
+    file: ../secrets/libero-password
+  vnc_password:
+    file: ../secrets/vnc-password

@@ -1,0 +1,261 @@
+# Creazione assistita Libero Mail
+
+Sistema separato da **Il Banco** che parte quando EmailMatcher non trova alcuna
+e-mail per il Nome e Cognome appena inserito.
+
+Aggiornamento del 16/09/2026 per il VPS `mulino-libero-01`. Il pacchetto usa
+la configurazione e i segreti già presenti in `/opt/mulino-libero`; il codice
+si installa nella sottocartella `app`. Non sostituire il tuo `.env` con
+`.env.example`: quest'ultimo è soltanto un riferimento.
+
+## Cosa fa
+
+1. EmailMatcher cerca il nominativo negli archivi esistenti.
+2. Se l'e-mail non esiste, crea una richiesta nel foglio `Coda`.
+3. Il nuovo bot chiede privatamente all'amministratore:
+   `GG/MM/AAAA | M/F | Città (PR)`.
+4. Il worker apre Libero in un contesto browser nuovo.
+5. Quando serve il telefono, il bot pubblica nel gruppo un messaggio generico.
+6. Il primo whitelistato che preme `Usa il mio numero` prende la richiesta.
+7. Il codice viene accettato soltanto dalla chat privata di quell'ID Telegram.
+8. Prima dell'invio finale, l'amministratore deve premere `Conferma creazione`.
+9. L'e-mail viene scritta nella riga Google Sheets originaria.
+10. Il contesto del browser viene chiuso: cookie, cache, local storage e
+    cronologia non passano alla registrazione successiva.
+
+Il programma non risolve, ricarica in ciclo o aggira CAPTCHA. Se Libero mostra
+una verifica interattiva, il browser resta aperto e l'amministratore riceve una
+richiesta di intervento manuale.
+
+## File
+
+- `EmailMatcher_aggiornato.gs`: sostituisce integralmente l'attuale file
+  EmailMatcher nello stesso progetto Apps Script di Il Banco.
+- `libero_mail_bot.py`: bot Telegram separato e worker Playwright.
+- `Dockerfile`, `docker-compose.yml`, `start.sh`: esecuzione continua su VPS.
+- `install.sh`: controllo della configurazione e installazione sul VPS.
+- `.env.example`: configurazione senza segreti.
+
+## 1. Aggiornare Apps Script
+
+Se hai già inizializzato `Coda` e `Whitelist` con questo EmailMatcher, questa
+parte è già completata. Il file Apps Script incluso non è stato modificato.
+
+1. Apri il progetto Apps Script nel quale sono presenti Il Banco ed
+   EmailMatcher.
+2. Sostituisci **l'intero contenuto del solo file EmailMatcher** con
+   `EmailMatcher_aggiornato.gs`.
+3. Salva.
+4. Dall'elenco funzioni esegui una volta:
+   `inizializzaSistemaCreazioneMail`.
+5. Accetta le autorizzazioni Google.
+6. Apri il log di esecuzione: troverai URL e ID del nuovo file
+   `Creazione Mail Libero`.
+7. Esegui `testSistemaCreazioneMail`.
+
+Il nuovo file contiene:
+
+- `Coda`: richieste e stati del worker;
+- `Whitelist`: soltanto le colonne `TELEGRAM_ID` e `NUMERO_TELEFONO`.
+
+Non modificare i titoli delle colonne. Inserisci i numeri preferibilmente nel
+formato internazionale, per esempio `+393331234567`.
+
+Il Banco non richiede modifiche: continua a chiamare `completaEmailRiga`, che
+ora accoda automaticamente la richiesta quando EmailMatcher non trova una mail.
+
+## 2. Creare il bot Telegram separato
+
+1. Crea un nuovo bot tramite BotFather; non riutilizzare il token di Il Banco.
+2. Crea un gruppo Telegram privato dedicato.
+3. Aggiungi `@Il_Mugnaio_Bot` al gruppo dedicato come amministratore.
+   Non servono poteri per bannare utenti, aggiungere amministratori o modificare
+   le informazioni del gruppo. La chat del gruppo può restare in sola lettura
+   per i membri: prendono la richiesta con il pulsante e rispondono in privato.
+4. L'amministratore e ogni whitelistato devono aprire la chat privata del bot e
+   inviare `/start`; Telegram non permette a un bot di iniziare autonomamente
+   una chat mai aperta dall'utente.
+5. Per conoscere il proprio ID si può usare `/id`.
+
+Il messaggio nel gruppo non mostra nome, cognome o indirizzo e-mail.
+
+## 3. Service account Google
+
+1. Crea un progetto in Google Cloud e abilita **Google Sheets API**.
+   Questa versione apre i documenti per ID e non richiede Google Drive API.
+2. Crea un service account e scarica la chiave JSON.
+3. Nel file Google `Creazione Mail Libero`, condividi il documento con
+   l'indirizzo e-mail del service account come **Editor**.
+4. Condividi con lo stesso indirizzo, sempre come Editor, anche il Google Sheet
+   nel quale EmailMatcher dovrà scrivere l'e-mail finale.
+5. Sul VPS la chiave è già salvata in:
+   `/opt/mulino-libero/secrets/google-service-account.json`.
+
+Non caricare mai questo JSON su GitHub o in chat.
+
+## 4. Configurare il server
+
+I file già configurati sul VPS sono:
+
+| Percorso relativo a `/opt/mulino-libero` | Contenuto |
+| --- | --- |
+| `.env` | ID del foglio, ID Telegram e nomi delle schede |
+| `secrets/google-service-account.json` | Chiave Google |
+| `secrets/telegram-bot-token` | Token di `@Il_Mugnaio_Bot` |
+| `secrets/libero-password` | Password scelta per le nuove caselle |
+
+Permessi: `600` per questi file e `700` per la cartella `secrets`.
+La configurazione `.env` usa questi nomi:
+
+```dotenv
+GOOGLE_SPREADSHEET_ID=ID_DEL_TUO_FOGLIO
+TELEGRAM_GROUP_ID=-1004493733217
+TELEGRAM_ADMIN_ID=7279460507
+GOOGLE_QUEUE_SHEET=Coda
+GOOGLE_WHITELIST_SHEET=Whitelist
+TZ=Europe/Rome
+```
+
+Il token e le password vengono letti dai rispettivi file; non occorre copiarli
+in `.env`. Sono ancora riconosciuti i vecchi nomi `ADMIN_TELEGRAM_ID` e
+`TELEGRAM_GROUP_CHAT_ID`, se presenti.
+
+La password Libero deve avere 8-20 caratteri, almeno una maiuscola, un numero
+e un simbolo tra `@ . + $ - _ !`, secondo la
+[pagina di registrazione Libero](https://registrazione.libero.it/) consultata
+il 16/09/2026. L'eventuale a capo aggiunto da nano a fine file viene ignorato.
+Se il controllo segnala una password non conforme, modifica solo il file
+`secrets/libero-password` con nano, salva e ripeti l'installazione.
+
+## 5. Installazione sul VPS
+
+Apri prima la chat privata di `@Il_Mugnaio_Bot` e invia `/start`. Fallo anche
+dall'account del primo whitelistato. Se il programma non è ancora avviato,
+in questo momento è normale non ricevere risposta.
+
+Scarica lo ZIP sul Desktop Windows. In **PowerShell Windows** (`PS C:\...>`),
+sostituendo soltanto `IP_DEL_SERVER` con l'indirizzo del VPS:
+
+```powershell
+scp "C:\Users\Utente\Desktop\creazione-libero-mail-v1.zip" root@IP_DEL_SERVER:/opt/mulino-libero/
+```
+
+Nella sessione **SSH del VPS** (`root@mulino-libero-01:...#`):
+
+```bash
+python3 -m zipfile -e /opt/mulino-libero/creazione-libero-mail-v1.zip /opt/mulino-libero/app
+cd /opt/mulino-libero/app
+bash install.sh
+```
+
+Lo script costruisce l'immagine e controlla configurazione, intestazioni del
+foglio, whitelist, bot, gruppo e chat privata dell'amministratore. Questi
+controlli non inviano messaggi e non modificano celle. L'accesso in scrittura
+verrà verificato durante il primo collaudo; la condivisione deve essere Editor.
+
+Se il controllo fallisce, lo script si ferma senza avviare una nuova istanza.
+Se riesce, avvia il servizio, che controlla la coda e si riavvia automaticamente
+dopo un riavvio del VPS. Il PC può essere spento; eventuali richieste di dati,
+codici, CAPTCHA e conferma finale attendono la risposta dell'utente.
+
+Viene creata anche una password VNC casuale di 8 caratteri nel file
+`/opt/mulino-libero/secrets/vnc-password`, conservata alle installazioni
+successive. È separata dalla password delle caselle.
+
+Comandi utili **nel VPS**:
+
+```bash
+cd /opt/mulino-libero/app
+docker compose --env-file ../.env ps
+docker compose --env-file ../.env logs --tail=60
+```
+
+Per fermare il servizio: `docker compose --env-file ../.env stop`.
+Per riavviarlo: `docker compose --env-file ../.env up -d`.
+Mantieni una sola istanza attiva per questo token Telegram.
+
+## Browser remoto e CAPTCHA
+
+Il browser grafico viene esposto da noVNC soltanto su `127.0.0.1:6080` del VPS.
+Da **PowerShell Windows**, apri un tunnel SSH e lascia aperta quella finestra:
+
+```powershell
+ssh -L 6080:127.0.0.1:6080 root@IP_DEL_SERVER
+```
+
+Sul PC Windows apri:
+
+```text
+http://127.0.0.1:6080/vnc.html
+```
+
+Nel terminale del VPS puoi leggere la sola password VNC con:
+
+```bash
+cat /opt/mulino-libero/secrets/vnc-password
+```
+
+Copiala nella schermata noVNC, senza inviarla in chat o in screenshot. Il link
+locale funziona dal PC con il tunnel aperto; dal telefono occorre configurare
+separatamente un tunnel o accesso privato. Non aprire la porta 6080 nel firewall.
+Quando compare un CAPTCHA, risolvilo nel browser e premi il pulsante di
+conferma inviato dal bot. Non vengono usati servizi di risoluzione automatica.
+
+## Uso del bot
+
+- `/start`: registra l'apertura della chat e verifica whitelist.
+- `/id`: mostra il Telegram ID.
+- `/stato`: stato della richiesta attiva, solo amministratore.
+- `/annulla`: annulla la richiesta attiva, solo amministratore.
+- `/riprova ID_RICHIESTA`: rimette in coda una richiesta in errore.
+
+Quando il bot chiede i dati anagrafici, rispondi in privato:
+
+```text
+15/04/1992 | M | Salerno (SA)
+```
+
+Se il Nome e Cognome del foglio è stato separato male:
+
+```text
+Mario | De Angelis | 15/04/1992 | M | Salerno (SA)
+```
+
+Dopo averli letti e validati, il bot prova a eliminare dalla chat il messaggio
+che conteneva questi dati. Non li scrive nel foglio di coda né nei log.
+
+La procedura automatica gestisce soltanto maggiorenni. Libero prevede per i
+minori un flusso distinto con consenso del responsabile, che resta manuale.
+
+## Primo collaudo
+
+1. Dopo l'avvio invia `/start` e `/stato` al bot in privato.
+2. Inserisci tramite Il Banco una singola richiesta autorizzata per un nominativo
+   senza email già presente. Verifica la nuova riga in `Coda` e la richiesta
+   privata dei dati anagrafici.
+3. Apri il browser remoto prima di fornire i dati e segui la prima registrazione.
+4. Verifica il pulsante nel gruppo, la ricezione privata del codice e la conferma
+   finale. Controlla poi la scrittura della mail nel foglio di destinazione.
+
+Il collaudo completo sul VPS, compresa una registrazione reale, resta da fare.
+Il sito può cambiare: i passaggi dopo i dati personali richiedono questa verifica
+assistita. Se una schermata non è riconosciuta, il worker segnala l'errore senza
+inviare il testo della pagina, che potrebbe contenere dati personali. Dopo un
+errore, controlla se l'account è già stato creato prima di usare `/riprova`.
+
+Le richieste interrotte da un riavvio sono marcate `ERRORE` e non vengono
+ritentate automaticamente, per evitare doppie registrazioni.
+
+## Verifiche del pacchetto
+
+I test di regressione estraggono le definizioni originali del worker, usano dati
+fittizi e simulano Telegram e Google. Richiedono solo Python 3.12; non effettuano
+registrazioni né inviano messaggi:
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+Non verificano le librerie esterne o i selettori del sito. La sintassi degli
+script e la struttura Compose sono controllate separatamente. La costruzione
+Docker e il collegamento ai tuoi account si verificano sul VPS con `install.sh`.
