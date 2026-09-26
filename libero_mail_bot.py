@@ -871,6 +871,7 @@ class RegistrationBrowser:
         phone_sent = False
         final_confirmed = False
         protection_submitted = False
+        final_submitted = False
 
         for _ in range(12):
             self.stage = "riconoscimento del passaggio successivo ai dati personali"
@@ -900,6 +901,7 @@ class RegistrationBrowser:
                 self.stage = "invio di Protezione Account dopo la conferma amministrativa"
                 await self._click_and_wait_for_change(button)
                 protection_submitted = True
+                final_submitted = True
                 continue
 
             phone_input = await self._find_phone_input()
@@ -919,12 +921,13 @@ class RegistrationBrowser:
             # La verifica telefonica può comparire sopra Protezione Account,
             # senza cambiare URL o rimuovere il titolo della pagina sottostante.
             # Prima si gestiscono telefono e OTP; il modulo iniziale resta già inviato.
-            if protection_page and protection_submitted:
-                raise RegistrationError(
-                    "Libero mostra ancora Protezione Account, ma non riconosco "
-                    "un campo attivo per telefono o codice. "
-                    "Il modulo non viene inviato una seconda volta automaticamente."
+            if final_submitted:
+                result = await self._wait_for_registration_step(
+                    request, username, final_submitted=True
                 )
+                if result == "created":
+                    return
+                continue
 
             final_button = await self._find_final_button()
             if final_button:
@@ -935,6 +938,7 @@ class RegistrationBrowser:
                 await self._handle_captcha_if_needed(request)
                 self.stage = "invio finale della registrazione"
                 await final_button.click()
+                final_submitted = True
                 await self.page.wait_for_timeout(1_500)
                 continue
 
@@ -945,12 +949,45 @@ class RegistrationBrowser:
                 await self.page.wait_for_timeout(1_000)
                 continue
 
-            await self._report_unknown_step(request)
-            raise RegistrationError(
-                "Passaggio Libero non riconosciuto: controlla l'avviso privato"
-            )
+            await self._wait_for_registration_step(request, username, final_submitted=False)
 
         raise RegistrationError("Troppi passaggi senza completare la registrazione")
+
+    async def _wait_for_registration_step(
+        self, request: QueueRequest, username: str, *, final_submitted: bool
+    ) -> str:
+        """Keep the current session open; never submit again to resolve uncertainty."""
+        assert self.page
+        self.stage = "attesa dell'esito della registrazione nel browser aperto"
+
+        async def ready() -> Optional[str]:
+            await self._check_cancelled()
+            try:
+                if await self._is_success_page():
+                    return "created"
+                if await self._find_phone_input():
+                    return "next"
+                if not final_submitted and (
+                    await self._is_account_protection_page()
+                    or await self._find_final_button()
+                    or await self._find_button(["Continua", "Avanti"])
+                ):
+                    return "next"
+            except PlaywrightError:
+                # A navigation can temporarily replace the page body.
+                if self.page.is_closed():
+                    raise RegistrationError("Il browser è stato chiuso durante l'attesa dell'esito.") from None
+            return None
+
+        # Give redirects and delayed content time before asking the operator.
+        for _ in range(10):
+            result = await ready()
+            if result:
+                return result
+            await self.page.wait_for_timeout(1_000)
+        return await self.coordinator.wait_for_registration_outcome(
+            request, username, ready_check=ready, allow_confirmation=final_submitted
+        )
 
     async def _is_account_protection_page(self) -> bool:
         assert self.page
@@ -2137,6 +2174,7 @@ class Coordinator:
         self.otp_future: Optional[asyncio.Future[str]] = None
         self.captcha_future: Optional[asyncio.Future[bool]] = None
         self.final_future: Optional[asyncio.Future[bool]] = None
+        self.outcome_review: Optional[dict[str, Any]] = None
         self.cancel_event = asyncio.Event()
         self.processing_task: Optional[asyncio.Task[None]] = None
         self._claim_lock = asyncio.Lock()
@@ -2427,15 +2465,17 @@ class Coordinator:
                 request,
                 STATO="ERRORE",
                 ERRORE=error_text[:500],
-                NOTE="Controllare e usare /riprova seguito dall'ID richiesta",
+                NOTE="Verificare se la casella esiste; usare /recupera prima di riprovare",
             )
             await self.bot.send_message(
                 chat_id=self.settings.admin_id,
                 text=(
-                    "❌ Creazione Libero Mail non completata\n\n"
+                    "⚠️ Esito della registrazione Libero da verificare\n\n"
                     f"ID: {request.request_id}\n"
                     f"Errore: {error_text[:1000]}\n\n"
-                    f"Per riprovare: /riprova {request.request_id}"
+                    "Controlla prima se la casella esiste già. Usa /recupera: "
+                    "se hai verificato l'accesso scegli Casella già creata. "
+                    "Ripeti la registrazione solo se la casella non è stata creata."
                 ),
             )
         finally:
@@ -2834,6 +2874,113 @@ class Coordinator:
         await self.cleanup_messages(request, "final")
         if not result:
             raise RequestCancelled("Creazione finale non autorizzata")
+
+    async def wait_for_registration_outcome(
+        self, request: QueueRequest, username: str, *, ready_check: Any,
+        allow_confirmation: bool,
+    ) -> str:
+        review = {
+            "request_id": request.request_id, "email": f"{username}@libero.it",
+            "token": secrets.token_hex(8), "confirmation_token": "",
+            "allow_confirmation": allow_confirmation,
+            "future": asyncio.get_running_loop().create_future(),
+        }
+        self.outcome_review = review
+        cancel_task = asyncio.create_task(self.cancel_event.wait())
+        try:
+            await self.set_queue_fields(
+                request, STATO="ATTESA_CONFERMA",
+                NOTE="Esito da verificare; browser mantenuto aperto",
+            )
+            text = (
+                "🔎 Non riconosco ancora il passaggio mostrato da Libero. "
+                "Il browser resta aperto e questa richiesta resta in attesa.\n\n"
+                f"Indirizzo previsto: {review['email']}\n\n"
+                "Controlla la schermata nel browser remoto. Se riconosco l'esito "
+                "o il passaggio successivo, riprendo automaticamente. "
+            )
+            keyboard = None
+            if allow_confirmation:
+                text += (
+                    "Se riesci già ad accedere alla casella, puoi confermarla "
+                    "con il pulsante qui sotto. Non ripetere la registrazione. "
+                )
+                keyboard = InlineKeyboardMarkup([[InlineKeyboardButton(
+                    "✅ Casella già creata", callback_data=f"outcome:{review['token']}"
+                )]])
+            text += "Per interrompere usa /annulla; poi /recupera per verificare l'esito."
+            if self.settings.remote_browser_url:
+                text += f"\n\nBrowser remoto: {self.settings.remote_browser_url}"
+            await self.send_temporary(
+                request, "outcome", chat_id=self.settings.admin_id,
+                text=text, reply_markup=keyboard,
+            )
+            while True:
+                if self.cancel_event.is_set():
+                    raise RequestCancelled("Richiesta annullata dall'amministratore")
+                result = await ready_check()
+                if self.cancel_event.is_set():
+                    raise RequestCancelled("Richiesta annullata dall'amministratore")
+                if not result and review["future"].done():
+                    result = review["future"].result()
+                if result:
+                    if result == "created" and allow_confirmation:
+                        # Preserve the confirmed outcome before any Telegram cleanup.
+                        self.record_created(request, username, review["email"])
+                    return result
+                await asyncio.wait(
+                    {review["future"], cancel_task}, timeout=1,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+        finally:
+            if self.outcome_review is review:
+                self.outcome_review = None
+            if not review["future"].done():
+                review["future"].cancel()
+            cancel_task.cancel()
+            await asyncio.gather(cancel_task, return_exceptions=True)
+            await self.cleanup_messages(request, "outcome")
+
+    async def handle_outcome_confirmation(self, query: Any) -> None:
+        if (query.from_user.id != self.settings.admin_id or not query.message
+                or query.message.chat.type != ChatType.PRIVATE
+                or query.message.chat.id != self.settings.admin_id):
+            await query.answer("Operazione riservata alla chat privata dell'amministratore.", show_alert=True)
+            return
+        review = self.outcome_review
+        action, _, token = (query.data or "").partition(":")
+        expected_token = (review.get("confirmation_token") if action == "outcome_yes"
+                          else review.get("token")) if review else None
+        if (not review or not review["allow_confirmation"] or not token
+                or token != expected_token or not self.active
+                or self.active.request_id != review["request_id"]
+                or review["future"].done() or self.cancel_event.is_set()):
+            await query.answer("Pulsante scaduto: usa la richiesta attuale.", show_alert=True)
+            return
+        if action == "outcome_yes":
+            review["future"].set_result("created")
+            await query.answer("Verifica dell'accesso confermata. Salvataggio in corso.")
+            return
+        if review["confirmation_token"]:
+            await query.answer("Conferma l'indirizzo nell'ultimo messaggio del bot.")
+            return
+        review["confirmation_token"] = secrets.token_hex(8)
+        try:
+            await self.send_temporary(
+                self.active, "outcome", chat_id=self.settings.admin_id,
+                text=(f"Indirizzo da salvare: {review['email']}\n\n"
+                      "Conferma solo dopo avere verificato personalmente l'accesso "
+                      "a questa esatta casella. Il bot salverà l'esito senza creare "
+                      "un altro account."),
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(
+                    "Ho verificato l'accesso: salva la casella",
+                    callback_data=f"outcome_yes:{review['confirmation_token']}",
+                )]]),
+            )
+        except Exception:
+            review["confirmation_token"] = ""
+            raise
+        await query.answer("Controlla l'indirizzo e conferma nel nuovo messaggio.")
 
     async def send_unknown_step(
         self, request: QueueRequest, url: str, visible_text: str
@@ -3301,6 +3448,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     if data.startswith("rec:"):
         await recovery_callback(update, context)
+        return
+
+    if data.startswith(("outcome:", "outcome_yes:")):
+        await coordinator.handle_outcome_confirmation(query)
         return
 
     if data.startswith("resend:"):

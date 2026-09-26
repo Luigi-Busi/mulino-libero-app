@@ -201,6 +201,23 @@ separatamente un tunnel o accesso privato. Non aprire la porta 6080 nel firewall
 Quando compare un CAPTCHA, risolvilo nel browser e premi il pulsante di
 conferma inviato dal bot. Non vengono usati servizi di risoluzione automatica.
 
+### Se la registrazione termina senza SMS o mostra una schermata sconosciuta
+
+La verifica telefonica non e obbligatoria per il bot: una pagina di successo
+riconosciuta conclude la richiesta anche senza SMS. Dopo l'invio finale, il bot
+attende anche le risposte lente senza premere di nuovo Registrati.
+
+Se la schermata non viene riconosciuta, il browser resta aperto e la richiesta
+rimane in attesa. Il bot riprende quando riconosce l'esito o il passaggio seguente.
+Dopo l'invio finale, nella chat privata amministrativa compare anche **Casella gia
+creata**: usarlo solo dopo aver verificato personalmente l'accesso all'indirizzo
+esatto. Una seconda conferma salva l'esito senza ripetere la registrazione.
+
+Per interrompere volontariamente usare `/annulla`. Per una richiesta gia terminata
+in errore usare `/recupera` e **Casella gia creata** dopo la verifica dell'accesso.
+Non usare Riprova registrazione per una casella che esiste gia.
+
+
 ## Uso del bot
 
 - `/start`: registra l'apertura della chat e verifica whitelist.
