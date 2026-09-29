@@ -1,5 +1,17 @@
 # Modifiche di Mulino Libero
 
+## v1.1.1 - 30 settembre 2026
+
+- Gli avvisi del Mugnaio usano il browser HTTPS privato tramite Tailscale.
+- Il comando /browser restituisce il collegamento solo all'amministratore in privato,
+  senza avviare registrazioni; distingue il collegamento dalla navigazione privata di Opera.
+- Il deploy ammette esclusivamente il passaggio fra i due indirizzi verificati,
+  mantenendo invariato ogni altro byte di Compose. Il rollback ripristina anche il link.
+- Il controllo preliminare usa la configurazione della release candidata e il
+  controllo di salute verifica il link effettivo nel container.
+
+Nessuna migrazione dei dati, nuova porta o modifica ai segreti e al Risponditore.
+
 ## v1.1.0 - 26 settembre 2026
 
 - Monitoraggio indipendente di bot, browser, disco e backup con Healthchecks.

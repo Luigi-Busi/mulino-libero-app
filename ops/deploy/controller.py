@@ -26,6 +26,24 @@ class Failure(RuntimeError):
 
 
 TAG = re.compile(r"v[0-9]+\.[0-9]+\.[0-9]+\Z")
+REMOTE_BROWSER_URLS = (
+    b'http://127.0.0.1:6080/vnc.html',
+    b'https://mulino-browser.tail1ce920.ts.net/vnc.html?autoconnect=1&resize=scale',
+)
+REMOTE_BROWSER_LINE = re.compile(rb'^      REMOTE_BROWSER_URL: ([^\r\n]+)(?=\r?$)', re.MULTILINE)
+
+
+def browser_url_only_change(before, after):
+    """Permit only the reviewed URL transition, with every other byte unchanged."""
+    if before == after:
+        return True
+    old, new = REMOTE_BROWSER_LINE.findall(before), REMOTE_BROWSER_LINE.findall(after)
+    if len(old) != 1 or len(new) != 1 or old[0] not in REMOTE_BROWSER_URLS or new[0] not in REMOTE_BROWSER_URLS:
+        return False
+    return (REMOTE_BROWSER_LINE.sub(b'      REMOTE_BROWSER_URL: REVIEWED', before)
+            == REMOTE_BROWSER_LINE.sub(b'      REMOTE_BROWSER_URL: REVIEWED', after))
+
+
 INTERRUPTS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
 HEALTH = r'''
 from pathlib import Path
@@ -215,15 +233,15 @@ class Manager:
                         os.utime(item, None)
         return destination
 
-    def compose(self, *args, override=None):
+    def compose(self, *args, override=None, compose_file=None):
         command = ['docker', 'compose', '--project-directory', self.c.app, '--env-file', self.c.env,
-                   '-p', self.c.project, '-f', self.c.app / 'docker-compose.yml']
+                   '-p', self.c.project, '-f', compose_file or self.c.app / 'docker-compose.yml']
         if override:
             command += ['-f', override]
         return self.run(command + list(args), timeout=300)
 
-    def model(self):
-        model = json.loads(self.compose('config', '--format', 'json', '--no-env-resolution'))
+    def model(self, compose_file=None):
+        model = json.loads(self.compose('config', '--format', 'json', '--no-env-resolution', compose_file=compose_file))
         if set(model['services']) != {self.c.service}:
             raise Failure('Questa procedura gestisce soltanto il servizio Docker del Mugnaio.')
         service = model['services'][self.c.service]
@@ -270,6 +288,11 @@ class Manager:
         actual = {(v['Source'], v['Destination'], v['RW']) for v in container['Mounts']}
         if actual != expected:
             raise Failure('I mount del container non coincidono con dati e segreti previsti.')
+        environment = model['services'][self.c.service].get('environment', {})
+        if 'REMOTE_BROWSER_URL' in environment:
+            actual_environment = dict(value.split('=', 1) for value in container['Config'].get('Env', []) if '=' in value)
+            if actual_environment.get('REMOTE_BROWSER_URL') != environment['REMOTE_BROWSER_URL']:
+                raise Failure('Il collegamento del browser nel container non coincide con la release.')
         return container
 
     def health(self, record):
@@ -354,8 +377,8 @@ class Manager:
             if actual.get('/app/' + name) != digest(source / name):
                 raise Failure('L immagine costruita non contiene il codice del tag: ' + name)
 
-    def check_integrations(self, record):
-        original = self.model()
+    def check_integrations(self, record, source):
+        original = self.model(compose_file=source / 'docker-compose.yml')
         service = original['services'][self.c.service]
         safe = {key: service[key] for key in ('env_file', 'environment', 'secrets') if key in service}
         safe['environment'] = dict(safe.get('environment', {}), DATA_DIR='/tmp/mulino-check')
@@ -405,7 +428,7 @@ class Manager:
             atomic(corrected, Path(baseline_tests).read_text())
             record['tests_override'] = {'path': str(corrected), 'sha256': digest(corrected)}
         self.unit_tests(record, source)
-        self.check_integrations(record)
+        self.check_integrations(record, source)
         if configuration != self.fingerprint():
             raise Failure('Configurazione cambiata durante la verifica iniziale.')
         state = {'schema': 1, 'current': record, 'previous': None, 'pending': None,
@@ -421,7 +444,9 @@ class Manager:
         source = self.source(sha)
         baseline = self.source(state['current']['sha'])
         for name in self.c.frozen_files:
-            if (source / name).read_bytes() != (baseline / name).read_bytes():
+            before, after = (baseline / name).read_bytes(), (source / name).read_bytes()
+            allowed = (browser_url_only_change(before, after) if name == 'docker-compose.yml' else before == after)
+            if not allowed:
                 raise Failure('Modifica da gestire separatamente: ' + name)
         if sha == state['current']['sha']:
             record = state['current']
@@ -445,7 +470,7 @@ class Manager:
             record = {'tag': tag, 'sha': sha, 'image': image, 'image_tag': image_tag, 'branch': ''}
         self.verify_image(record, source)
         self.unit_tests(record, source)
-        self.check_integrations(record)
+        self.check_integrations(record, source)
         self.retain_image(record)
         atomic(source.parent / 'release.json', json.dumps(record))
         return record

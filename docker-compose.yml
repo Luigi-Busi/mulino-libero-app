@@ -19,7 +19,7 @@ services:
       LIBERO_PASSWORD_FILE: /run/secrets/libero-password
       GOOGLE_SERVICE_ACCOUNT_FILE: /run/secrets/google-service-account.json
       VNC_PASSWORD_FILE: /run/secrets/vnc-password
-      REMOTE_BROWSER_URL: http://127.0.0.1:6080/vnc.html
+      REMOTE_BROWSER_URL: https://mulino-browser.tail1ce920.ts.net/vnc.html?autoconnect=1&resize=scale
     secrets:
       - source: google_service_account
         target: google-service-account.json

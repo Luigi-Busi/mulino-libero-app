@@ -108,7 +108,13 @@ Problemi esterni a Telegram/Google non vengono risolti tornando a una vecchia im
   websockify, pagina noVNC e stabilita del container per almeno 15 secondi.
   Non equivale a una registrazione completa presso Libero, che richiede l'intervento umano.
 - Modifiche a Compose, al Risponditore o al suo installer richiedono una procedura
-  separata e vengono bloccate. Cambiamenti a `.env` o ai metadati dei segreti
+  separata e vengono bloccate. Dalla v1.1.1 esiste una sola eccezione: il passaggio
+  fra il precedente URL loopback e l'URL HTTPS Tailscale verificato del Mulino.
+  La riga REMOTE_BROWSER_URL deve essere unica e ogni altro byte di Compose
+  deve restare identico. Porte, volumi, segreti e privilegi non possono cambiare.
+  Preflight usa Compose del tag candidato; controllo di salute e rollback
+  verificano anche il valore del link effettivamente usato dal container.
+  Cambiamenti a `.env` o ai metadati dei segreti
   bloccano gli aggiornamenti finche non si verifica e riallinea la baseline.
 - Non vengono cancellati volumi, dati, segreti o immagini. La normale applicazione
   continua naturalmente a utilizzare e aggiornare i propri dati.

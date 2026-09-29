@@ -7,7 +7,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 
-from controller import Config, Failure, Manager, digest
+from controller import Config, Failure, Manager, digest, REMOTE_BROWSER_URLS
 
 
 def command(*args, cwd=None):
@@ -43,12 +43,23 @@ def main():
         'build': '.', 'image': project + ':initial', 'container_name': project,
         'restart': 'unless-stopped', 'init': True, 'stop_grace_period': '2s',
         'env_file': ['../.env'], 'volumes': ['../data:/data'],
+        'environment': {'REMOTE_BROWSER_URL': REMOTE_BROWSER_URLS[0].decode()},
         'secrets': [{'source': 'probe', 'target': 'probe'}],
         'healthcheck': {'test': ['CMD', 'python', '-c',
             "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080',timeout=1)"],
             'interval': '1s', 'timeout': '2s', 'retries': 2, 'start_period': '1s'}
     }}, 'secrets': {'probe': {'file': '../secrets/probe'}}}
-    (app / 'docker-compose.yml').write_text(json.dumps(model))
+    def write_model():
+        # Plain YAML URL line matches production, all other fixture fields are fixed.
+        lines = ['name: ' + project, 'services:', '  probe:']
+        for key, value in model['services']['probe'].items():
+            if key == 'environment':
+                lines += ['    environment:', '      REMOTE_BROWSER_URL: ' + value['REMOTE_BROWSER_URL']]
+            else:
+                lines += ['    ' + key + ': ' + json.dumps(value)]
+        lines += ['secrets: ' + json.dumps(model['secrets'])]
+        (app / 'docker-compose.yml').write_text('\n'.join(lines) + '\n')
+    write_model()
     (app / 'Dockerfile').write_text('FROM python:3.12-slim\nWORKDIR /app\nCOPY libero_mail_bot.py start.sh requirements.txt /app/\nCMD ["python", "/app/libero_mail_bot.py"]\n')
     (app / 'requirements.txt').write_text('# no extra packages\n')
     (app / 'start.sh').write_text('#!/bin/sh\nexec python /app/libero_mail_bot.py\n')
@@ -64,6 +75,8 @@ from pathlib import Path
 if '--check' in sys.argv:
     assert not Path('/data/marker').exists(), 'production volume leaked into preflight'
     assert Path('/run/secrets/probe').read_text() == 'SYNTHETIC TEST SECRET\\n'
+    import os
+    assert os.environ['REMOTE_BROWSER_URL'] == {model['services']['probe']['environment']['REMOTE_BROWSER_URL']!r}, 'preflight used the wrong release URL'
     print('fixture preflight OK')
     sys.exit(0)
 VERSION = {version!r}
@@ -84,6 +97,8 @@ HTTPServer(('0.0.0.0',8080), SimpleHTTPRequestHandler).serve_forever()
     git('config', 'user.email', 'test@localhost')
     commit('v1.0.0')
     git('checkout', '-b', 'candidates')
+    model['services']['probe']['environment']['REMOTE_BROWSER_URL'] = REMOTE_BROWSER_URLS[1].decode()
+    write_model()
     worker('1.0.1')
     commit('v1.0.1')
     worker('1.0.2', broken=True)
@@ -93,7 +108,7 @@ HTTPServer(('0.0.0.0',8080), SimpleHTTPRequestHandler).serve_forever()
     commit('v1.0.3')
     (app / 'tests' / 'test_probe.py').write_text(test_code)
     model['services']['probe']['restart'] = 'always'
-    (app / 'docker-compose.yml').write_text(json.dumps(model))
+    write_model()
     commit('v1.0.4')
     git('checkout', 'main')
     command('git', 'clone', '--bare', str(app), str(root / 'origin.git'))
@@ -121,11 +136,15 @@ HTTPServer(('0.0.0.0',8080), SimpleHTTPRequestHandler).serve_forever()
             assert manager.load()['previous']['tag'] == 'v1.0.0'
             assert manager.load()['current']['tag'] == 'v1.0.1'
             passed('successful deployment with real Compose')
+            assert 'REMOTE_BROWSER_URL=' + REMOTE_BROWSER_URLS[1].decode() in manager.inspect()['Config']['Env']
+            passed('reviewed browser URL is active and candidate preflight used it')
             manager.offline_recovery = True
             manager.rollback(True)
             manager.offline_recovery = False
             assert manager.load()['current']['tag'] == 'v1.0.0'
             passed('manual rollback without build or network fetch')
+            assert 'REMOTE_BROWSER_URL=' + REMOTE_BROWSER_URLS[0].decode() in manager.inspect()['Config']['Env']
+            passed('offline rollback also restores the previous browser URL')
             try:
                 manager.deploy('v1.0.2', True, True)
                 raise AssertionError('bad runtime was accepted')
@@ -134,6 +153,8 @@ HTTPServer(('0.0.0.0',8080), SimpleHTTPRequestHandler).serve_forever()
             assert manager.load()['current']['tag'] == 'v1.0.0'
             assert manager.inspect()['State']['Running']
             passed('failed startup automatically restores healthy previous image')
+            assert 'REMOTE_BROWSER_URL=' + REMOTE_BROWSER_URLS[0].decode() in manager.inspect()['Config']['Env']
+            passed('automatic rollback restores previous browser URL after failed startup')
             stable_id = manager.inspect()['Id']
             try:
                 manager.deploy('v1.0.3', True, True)
@@ -188,7 +209,7 @@ HTTPServer(('0.0.0.0',8080), SimpleHTTPRequestHandler).serve_forever()
         report = root / 'report.json'
         report.write_text(json.dumps({'passed': results, 'workspace': str(root)}, indent=2))
         print('REPORT:', report, flush=True)
-    assert len(results) == 11
+    assert len(results) == 14
 
 
 if __name__ == '__main__':

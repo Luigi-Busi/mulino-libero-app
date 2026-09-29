@@ -7,7 +7,67 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from controller import Config, Failure, Manager, atomic
+from controller import Config, Failure, Manager, atomic, browser_url_only_change, REMOTE_BROWSER_URLS
+
+
+class BrowserComposeTests(unittest.TestCase):
+    def setUp(self):
+        self.before = b'services:\n  libero-mail-bot:\n    environment:\n      REMOTE_BROWSER_URL: ' + REMOTE_BROWSER_URLS[0] + b'\n    ports:\n      - "127.0.0.1:6080:6080"\n'
+        self.after = self.before.replace(REMOTE_BROWSER_URLS[0], REMOTE_BROWSER_URLS[1])
+
+    def test_reviewed_transition_and_reverse_are_allowed(self):
+        self.assertTrue(browser_url_only_change(self.before, self.after))
+        self.assertTrue(browser_url_only_change(self.after, self.before))
+        self.assertTrue(browser_url_only_change(self.before, self.before))
+        self.assertTrue(browser_url_only_change(self.before.replace(b'\n', b'\r\n'), self.after.replace(b'\n', b'\r\n')))
+
+    def test_unreviewed_urls_credentials_and_public_endpoints_are_rejected(self):
+        for url in (b'https://example.com/vnc.html', b'http://80.211.133.89:6080/vnc.html',
+                    REMOTE_BROWSER_URLS[1] + b'&password=secret', REMOTE_BROWSER_URLS[1] + b'#secret',
+                    REMOTE_BROWSER_URLS[1].replace(b'https://', b'https://user:secret@')):
+            with self.subTest(url=url):
+                self.assertFalse(browser_url_only_change(self.before, self.after.replace(REMOTE_BROWSER_URLS[1], url)))
+
+    def test_other_compose_changes_remain_blocked(self):
+        for extra in (self.after.replace(b'127.0.0.1:6080', b'0.0.0.0:6080'),
+                      self.after + b'    privileged: true\n',
+                      self.after + b'    volumes: ["../secrets:/data"]\n',
+                      self.after.replace(b'\n', b'\r\n'),
+                      self.after.replace(b'    ports:', b'    network_mode: host\n    ports:')):
+            self.assertFalse(browser_url_only_change(self.before, extra))
+
+    def test_removed_duplicated_or_reindented_url_is_rejected(self):
+        for after in (self.after.replace(b'      REMOTE_BROWSER_URL:', b'      OTHER:'),
+                      self.after + b'      REMOTE_BROWSER_URL: ' + REMOTE_BROWSER_URLS[1] + b'\n',
+                      self.after.replace(b'      REMOTE_BROWSER_URL:', b'        REMOTE_BROWSER_URL:')):
+            self.assertFalse(browser_url_only_change(self.before, after))
+
+    def test_preflight_uses_candidate_compose_and_no_production_data_mount(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            manager = Manager(Config(app=root / 'app', state=root))
+            candidate = root / 'candidate'
+            model = {'services': {manager.c.service: {'environment': {'REMOTE_BROWSER_URL': REMOTE_BROWSER_URLS[1].decode()}}}}
+            with patch.object(manager, 'model', return_value=model) as render, patch.object(manager, 'run', return_value=''):
+                manager.check_integrations({'image_tag': 'test:image'}, candidate)
+            render.assert_called_once_with(compose_file=candidate / 'docker-compose.yml')
+            preflight = json.loads((root / 'preflight.json').read_text())['services'][manager.c.service]
+            self.assertEqual(preflight['environment']['REMOTE_BROWSER_URL'], REMOTE_BROWSER_URLS[1].decode())
+            self.assertNotIn('volumes', preflight)
+            self.assertEqual(preflight['environment']['DATA_DIR'], '/tmp/mulino-check')
+
+    def test_runtime_rejects_stale_browser_url(self):
+        manager = Manager()
+        record = release('v1.1.1', 'a' * 40)
+        container = {'Image': record['image'], 'Config': {'Labels': {'com.docker.compose.project': manager.c.project, 'com.docker.compose.service': manager.c.service},
+                     'Env': ['REMOTE_BROWSER_URL=' + REMOTE_BROWSER_URLS[0].decode()]},
+                     'Mounts': [{'Source': str(manager.c.data), 'Destination': '/data', 'RW': True}]}
+        model = {'services': {manager.c.service: {'environment': {'REMOTE_BROWSER_URL': REMOTE_BROWSER_URLS[1].decode()}}}}
+        with patch.object(manager, 'model', return_value=model), patch.object(manager, 'inspect', return_value=container):
+            with self.assertRaisesRegex(Failure, 'collegamento'):
+                manager.runtime_matches(record)
+            container['Config']['Env'] = ['REMOTE_BROWSER_URL=' + REMOTE_BROWSER_URLS[1].decode()]
+            manager.runtime_matches(record)
 
 
 def release(tag, sha):

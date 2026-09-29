@@ -3045,6 +3045,27 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         )
 
 
+async def browser_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show the configured viewer only to the administrator in a private chat."""
+    coordinator: Coordinator = context.application.bot_data["coordinator"]
+    if (not update.effective_user or not update.effective_chat or not update.effective_message
+            or update.effective_user.id != coordinator.settings.admin_id
+            or update.effective_chat.type != ChatType.PRIVATE):
+        return
+    url = coordinator.settings.remote_browser_url
+    if not url:
+        await update.effective_message.reply_text("Collegamento al browser remoto non configurato.")
+        return
+    await update.effective_message.reply_text(
+        "Browser remoto: " + url + "\n\n"
+        "Tailscale deve essere collegato. Sul PC usa l'icona Mulino Libero - Browser privato "
+        "per aprire Opera privata; sull'iPhone copia il link in una scheda privata di Opera. "
+        "Il link Telegram non forza la navigazione privata. "
+        "Se non ci sono registrazioni aperte, il desktop puo essere nero.",
+        disable_web_page_preview=True,
+    )
+
+
 async def id_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_user and update.effective_message:
         await update.effective_message.reply_text(
@@ -3802,6 +3823,7 @@ def main() -> None:
     application.add_handler(CommandHandler("controlla", consistency_command))
     application.add_handler(CommandHandler("backup", backup_command))
     application.add_handler(CommandHandler("pausa", pause_command))
+    application.add_handler(CommandHandler("browser", browser_command))
     application.add_handler(CommandHandler("riprendi", resume_command))
     application.add_handler(CommandHandler("annulla", cancel_command))
     application.add_handler(CommandHandler("riprova", retry_command))
