@@ -1,5 +1,19 @@
 # Modifiche di Mulino Libero
 
+## v1.1.2 - 30 settembre 2026
+
+- Diagnostica delle fasi e di chiusura/crash pagina, contesto e browser, con
+  codici statici e identificativi pseudonimi; nessun contenuto o dato personale.
+- La pulizia del browser non maschera l'errore iniziale e ha tempi limitati.
+- Il launcher registra il primo componente terminato e preserva il codice di
+  uscita; distingue i segnali di arresto richiesti dalle chiusure inattese.
+- Osservatore Docker separato in sola lettura, rapporti riservati e rotazione
+  limitata; test di crash e arresto su ambienti fittizi.
+- Il deploy verifica anche l'hash del nuovo modulo e resta compatibile con i tag precedenti.
+
+Nessuna migrazione, modifica a Compose o ai segreti, né nuovi tentativi automatici.
+Procedura, recupero e limiti in ops/diagnostics/README.md.
+
 ## v1.1.1 - 30 settembre 2026
 
 - Gli avvisi del Mugnaio usano il browser HTTPS privato tramite Tailscale.

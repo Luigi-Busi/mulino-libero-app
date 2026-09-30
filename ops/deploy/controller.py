@@ -364,7 +364,7 @@ class Manager:
                 self.run(['docker', 'rm', '-f', name])
 
     def image_files(self, source):
-        optional = ('runtime_health.py',) if (source / 'runtime_health.py').is_file() else ()
+        optional = tuple(name for name in ('runtime_health.py', 'browser_diagnostics.py') if (source / name).is_file())
         return self.c.image_files + optional
 
     def verify_image(self, record, source):

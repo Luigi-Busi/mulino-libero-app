@@ -324,6 +324,18 @@ class GuardTests(unittest.TestCase):
         with patch.object(self.m, 'run', return_value=output + digest(self.path / 'runtime_health.py') + '  /app/runtime_health.py'):
             self.m.verify_image({'image': 'sha256:abc'}, self.path)
 
+    def test_diagnostics_module_must_match_release_when_present(self):
+        from controller import digest
+        self.m = Manager(Config(app=self.path / 'app', state=self.path / 'state', image_files=('worker.py',)))
+        (self.path / 'worker.py').write_text('worker')
+        (self.path / 'browser_diagnostics.py').write_text('reviewed diagnostics')
+        output = digest(self.path / 'worker.py') + '  /app/worker.py\n'
+        with patch.object(self.m, 'run', return_value=output + 'wrong  /app/browser_diagnostics.py'):
+            with self.assertRaisesRegex(Failure, 'codice del tag'):
+                self.m.verify_image({'image': 'sha256:abc'}, self.path)
+        with patch.object(self.m, 'run', return_value=output + digest(self.path / 'browser_diagnostics.py') + '  /app/browser_diagnostics.py'):
+            self.m.verify_image({'image': 'sha256:abc'}, self.path)
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)

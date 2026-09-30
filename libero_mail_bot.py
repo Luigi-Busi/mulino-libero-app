@@ -39,6 +39,7 @@ from urllib.parse import urlsplit, urlunsplit
 from zipfile import ZipFile, ZIP_DEFLATED
 
 import gspread
+from browser_diagnostics import BrowserDiagnostics, error_kind
 from runtime_health import HealthRequest, RuntimeHealth
 from dotenv import load_dotenv
 from gspread.utils import rowcol_to_a1
@@ -625,55 +626,88 @@ class RegistrationBrowser:
         self.page: Optional[Page] = None
         self.stage = "avvio del browser"
         self.expected_email: Optional[str] = None
+        self.diagnostics: Optional[BrowserDiagnostics] = None
+
+    @property
+    def stage(self) -> str:
+        return self._stage
+
+    @stage.setter
+    def stage(self, value: str) -> None:
+        self._stage = value
+        if getattr(self, "diagnostics", None):
+            self.diagnostics.set_phase(value)
+
+    async def _cleanup_browser(self) -> None:
+        # Retain the original failure even when an already closed target rejects
+        # cleanup. Close the context before the browser, with bounded waits.
+        for component, target, method in (
+            ("cookies", self.context, "clear_cookies"),
+            ("context", self.context, "close"),
+            ("browser", self.browser, "close"),
+        ):
+            if target is None:
+                continue
+            try:
+                await asyncio.wait_for(getattr(target, method)(), timeout=5)
+            except Exception as exc:
+                self.diagnostics.emit("cleanup_error", component=component, error=error_kind(exc))
 
     async def create_account(
         self, request: QueueRequest, personal: PersonalData
     ) -> tuple[str, str]:
-        async with async_playwright() as playwright:
-            self.browser = await playwright.chromium.launch(
-                headless=self.settings.headless,
-                args=["--disable-dev-shm-usage", "--no-sandbox"],
-            )
-            self.context = await self.browser.new_context(
-                locale="it-IT",
-                timezone_id="Europe/Rome",
-                viewport={"width": 1365, "height": 900},
-            )
-            self.page = await self.context.new_page()
-            self.coordinator.monitor_browser = self
-
-            try:
-                self.stage = "apertura della pagina Libero"
-                await self.page.goto(
-                    self.settings.registration_url,
-                    wait_until="domcontentloaded",
-                    timeout=45_000,
-                )
-                self.stage = "gestione del banner cookie"
-                await self._dismiss_cookie_banner()
-                username = await self._fill_credentials(request, personal)
-                await self._fill_personal_data(request, personal)
-                await self._complete_remaining_steps(request, username, personal)
-                self.coordinator.record_created(request, username, f"{username}@libero.it")
-                return username, f"{username}@libero.it"
-            except PlaywrightTimeoutError:
-                # Il messaggio originale di Playwright può riportare valori
-                # digitati: registrare soltanto il nome statico della fase.
-                raise RegistrationError(
-                    f"Tempo scaduto durante: {self.stage}."
-                ) from None
-            finally:
-                self.coordinator.monitor_browser = None
-                # Un contesto nuovo per ogni account garantisce la rimozione di
-                # cookie, cache, local storage e cronologia fra le registrazioni.
-                if self.context:
-                    try:
-                        await self.context.clear_cookies()
-                    except Exception:
-                        LOGGER.exception("Impossibile pulire i cookie")
-                    await self.context.close()
-                if self.browser:
-                    await self.browser.close()
+        self.diagnostics = BrowserDiagnostics(request.request_id)
+        self.diagnostics.emit("session_start")
+        reason = "error"
+        try:
+            async with async_playwright() as playwright:
+                try:
+                    self.browser = await playwright.chromium.launch(
+                        headless=self.settings.headless,
+                        args=["--disable-dev-shm-usage", "--no-sandbox"],
+                    )
+                    self.diagnostics.attach_browser(self.browser)
+                    self.context = await self.browser.new_context(
+                        locale="it-IT",
+                        timezone_id="Europe/Rome",
+                        viewport={"width": 1365, "height": 900},
+                    )
+                    self.diagnostics.attach_context(self.context)
+                    self.page = await self.context.new_page()
+                    self.diagnostics.attach_page(self.page)
+                    self.coordinator.monitor_browser = self
+                    self.stage = "apertura della pagina Libero"
+                    await self.page.goto(
+                        self.settings.registration_url,
+                        wait_until="domcontentloaded",
+                        timeout=45_000,
+                    )
+                    self.stage = "gestione del banner cookie"
+                    await self._dismiss_cookie_banner()
+                    username = await self._fill_credentials(request, personal)
+                    await self._fill_personal_data(request, personal)
+                    await self._complete_remaining_steps(request, username, personal)
+                    self.coordinator.record_created(request, username, f"{username}@libero.it")
+                    reason = "completed"
+                    return username, f"{username}@libero.it"
+                except BaseException as exc:
+                    self.diagnostics.failure(exc)
+                    reason = self.diagnostics.reason
+                    if isinstance(exc, PlaywrightTimeoutError):
+                        raise RegistrationError(f"Tempo scaduto durante: {self.stage}.") from None
+                    raise
+                finally:
+                    self.coordinator.monitor_browser = None
+                    self.diagnostics.begin_cleanup(reason)
+                    await self._cleanup_browser()
+        except BaseException as exc:
+            if not self.diagnostics.failure_seen:
+                self.diagnostics.failure(exc, component="driver")
+                reason = self.diagnostics.reason
+            raise
+        finally:
+            self.diagnostics.reason = reason
+            self.diagnostics.emit("session_end")
 
     async def _dismiss_cookie_banner(self) -> None:
         assert self.page
