@@ -18,10 +18,38 @@ non esegue deploy/rollback e non aggiunge porte o servizi esterni.
   Non avvia il backup completo cifrato o il trasferimento PC, verificati da Controlli.
 
 Ogni tastiera è vincolata al messaggio e alla chat, dura 15 minuti e viene
-consumata e sostituita dopo una pressione valida. Dopo un riavvio riaprire /menu.
+consumata e sostituita dopo una pressione valida. Menu/Apri/Chiudi sono sola
+navigazione e possono aggiornare la tastiera del pannello corrente anche dopo
+scadenza o riavvio; le azioni scadute di pausa/ripresa/creazione restano bloccate.
 Una pressione duplicata, inoltrata o una conferma inventata non ripete l'azione.
 La tastiera è una fotografia: Stato la aggiorna. I messaggi del menu non sono
 inseriti fra i messaggi temporanei di una registrazione e non ne sono cancellati.
+
+## Pannello riutilizzabile dalla v1.2.1
+
+/menu, /pannello e /start aggiornano lo stesso messaggio del bot. Chiudi lo
+riduce a una riga con Apri pannello; Apri ripristina la pagina principale.
+È possibile fissare manualmente questo messaggio in Telegram. Nessun pin o
+cancellazione automatica della cronologia viene eseguito.
+
+Browser, pausa/ripresa e copie del registro mostrano i risultati nel pannello.
+Un backup aggiorna «in corso» con l'esito. Se si naviga o si chiude durante
+l'operazione, l'esito resta leggibile premendo Backup e non sovrascrive la pagina
+corrente. Errori di backup o rotazione producono un avviso privato separato.
+Gli altri avvisi urgenti, la gestione SMS/CAPTCHA e i comandi diretti conservano
+il comportamento precedente.
+
+Il riferimento del pannello è una sola voce admin_panel nella tabella
+runtime_settings già esistente: contiene soltanto tre numeri (proprietario,
+bot, messaggio), senza testo o credenziali. Nessun cambio di schema. Il rollback
+alla v1.2.0 ignora la voce e continua a leggere pausa ed esiti; i backup del
+registro restano compatibili. Solo il programma scrive questa preferenza.
+
+Se il messaggio noto è stato eliminato/non è modificabile viene ricreato;
+un errore di rete durante la modifica non avvia un nuovo invio. Il riuso dopo
+riavvio richiede che il riferimento sia stato salvato: eventuali errori di
+salvataggio sono mostrati nel pannello. Un risultato non recapitato è conservato
+in memoria per la sessione corrente e non causa un secondo backup.
 
 ## Collegamento al monitor
 

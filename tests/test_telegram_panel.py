@@ -1,6 +1,7 @@
 import asyncio
 from datetime import datetime, timedelta, timezone
 import json
+import sqlite3
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -8,17 +9,21 @@ import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
 from test_regressions import worker
-from telegram_panel import COMPONENTS, PanelSessions, controls_text
+from telegram_panel import COMPONENTS, PanelSessions, ReusablePanel, controls_text
 
 
 class PanelTests(unittest.IsolatedAsyncioTestCase):
     def setup_panel(self, user=99, chat=99, kind='private'):
-        message = SimpleNamespace(chat=SimpleNamespace(id=chat, type=kind), message_id=42, is_accessible=True)
+        message = SimpleNamespace(chat=SimpleNamespace(id=chat, type=kind), message_id=42, is_accessible=True, from_user=SimpleNamespace(id=7))
         message.reply_text = AsyncMock(return_value=message)
         message.edit_text = AsyncMock(return_value=message)
-        coordinator = SimpleNamespace(settings=SimpleNamespace(admin_id=99, remote_browser_url='https://example.test/view'),
+        db=sqlite3.connect(':memory:', isolation_level=None)
+        db.execute('CREATE TABLE runtime_settings (key TEXT PRIMARY KEY,value TEXT NOT NULL)')
+        self.addCleanup(db.close)
+        bot=SimpleNamespace(id=7,send_message=AsyncMock(return_value=message),edit_message_text=AsyncMock(return_value=message))
+        coordinator = SimpleNamespace(bot=bot,panel=ReusablePanel(db,99),settings=SimpleNamespace(admin_id=99, remote_browser_url='https://example.test/view'),
                                       paused=False, active=None, registration_busy=Mock(return_value=False),
-                                      outcomes=SimpleNamespace(pending_count=Mock(return_value=0)),
+                                      outcomes=SimpleNamespace(db=db,pending_count=Mock(return_value=0)),
                                       panel_sessions=PanelSessions(), store=SimpleNamespace(whitelist_map=Mock()))
         coordinator.queue_status_text = lambda: 'Coda: IN PAUSA.' if coordinator.paused else 'Coda: ATTIVA.'
         def pause(value):
@@ -26,7 +31,7 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
         coordinator.set_paused = Mock(side_effect=pause)
         update = SimpleNamespace(effective_user=SimpleNamespace(id=user), effective_chat=message.chat,
                                  effective_message=message, callback_query=None)
-        context = SimpleNamespace(application=SimpleNamespace(bot_data={'coordinator': coordinator}), args=[])
+        context = SimpleNamespace(application=SimpleNamespace(bot_data={'coordinator': coordinator},bot=bot), args=[])
         return coordinator, update, context, message
 
     def callback(self, update, message, action, token=None, user=99):
@@ -41,7 +46,7 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
         for user, chat, kind in ((11, 11, 'private'), (99, -1, 'group'), (99, -1, 'supergroup'), (99, 11, 'private')):
             c, u, ctx, m = self.setup_panel(user, chat, kind)
             await worker.panel_command(u, ctx)
-            m.reply_text.assert_not_awaited()
+            c.bot.send_message.assert_not_awaited()
             self.assertFalse(c.panel_sessions.entries)
 
     async def test_missing_fields_do_not_open_panel(self):
@@ -49,13 +54,13 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
             c, u, ctx, m = self.setup_panel()
             setattr(u, field, None)
             await worker.panel_command(u, ctx)
-            m.reply_text.assert_not_awaited()
+            c.bot.send_message.assert_not_awaited()
 
     async def test_owner_start_opens_panel_without_google_request(self):
         c, u, ctx, m = self.setup_panel()
         await worker.start_command(u, ctx)
         c.store.whitelist_map.assert_not_called()
-        labels = [b.text for row in m.reply_text.call_args.kwargs['reply_markup'].inline_keyboard for b in row]
+        labels = [b.text for row in c.bot.send_message.call_args.kwargs['reply_markup'].inline_keyboard for b in row]
         for word in ('Stato', 'Pausa', 'Browser remoto', 'Controlli', 'Backup'):
             self.assertTrue(any(word in label for label in labels))
         self.assertNotIn('Riprendi', ' '.join(labels))
@@ -80,7 +85,7 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
                 q.message = None
             await worker.callback_handler(u, ctx)
             c.set_paused.assert_not_called()
-            m.edit_text.assert_not_awaited()
+            c.bot.edit_message_text.assert_not_awaited()
             self.assertTrue(q.answer.call_args.kwargs['show_alert'])
 
     async def test_expired_and_post_restart_buttons_do_not_act(self):
@@ -102,8 +107,8 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
         await worker.callback_handler(u, ctx)
         c.set_paused.assert_called_once_with(True)
         self.assertEqual(c.active.request_id, 'fixture')
-        self.assertIn('continua', m.reply_text.call_args.args[0])
-        self.assertTrue(any('Riprendi' in b.text for row in m.edit_text.call_args.kwargs['reply_markup'].inline_keyboard for b in row))
+        self.assertIn('continua', c.bot.edit_message_text.call_args.kwargs['text'])
+        self.assertTrue(any('Riprendi' in b.text for row in c.bot.edit_message_text.call_args.kwargs['reply_markup'].inline_keyboard for b in row))
         # Same callback cannot perform a second pause or toggle back to active.
         await worker.callback_handler(u, ctx)
         c.set_paused.assert_called_once()
@@ -114,7 +119,7 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
         c.set_paused.side_effect = worker.RegistrationError('Pausa non salvata')
         self.callback(u, m, 'pause')
         await worker.callback_handler(u, ctx)
-        self.assertIn('non salvata', m.reply_text.call_args.args[0])
+        self.assertIn('non salvata', c.bot.edit_message_text.call_args.kwargs['text'])
 
     async def test_resume_uses_existing_handler_and_button_changes(self):
         c, u, ctx, m = await self.opened()
@@ -130,15 +135,15 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
         c.outcomes.pending_count.return_value = 7
         self.callback(u, m, 'status')
         await worker.callback_handler(u, ctx)
-        self.assertIn('Sheets: 7', m.edit_text.call_args.args[0])
+        self.assertIn('Sheets: 7', c.bot.edit_message_text.call_args.kwargs['text'])
         c.set_paused.assert_not_called()
 
     async def test_browser_link_remains_private_and_does_not_start_registration(self):
         c, u, ctx, m = await self.opened()
         self.callback(u, m, 'browser')
         await worker.callback_handler(u, ctx)
-        self.assertIn(c.settings.remote_browser_url, m.reply_text.call_args.args[0])
-        self.assertTrue(m.reply_text.call_args.kwargs['disable_web_page_preview'])
+        self.assertIn(c.settings.remote_browser_url, c.bot.edit_message_text.call_args.kwargs['text'])
+        self.assertTrue(c.bot.edit_message_text.call_args.kwargs['disable_web_page_preview'])
         c.set_paused.assert_not_called()
 
     async def test_controls_only_reads_report_and_does_not_change_queue(self):
@@ -147,32 +152,32 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(worker, 'controls_text', return_value='Ultimo controllo: fixture') as read:
             await worker.callback_handler(u, ctx)
         read.assert_called_once_with()
-        self.assertEqual(m.edit_text.call_args.args[0], 'Ultimo controllo: fixture')
+        self.assertEqual(c.bot.edit_message_text.call_args.kwargs['text'], 'Ultimo controllo: fixture')
         c.set_paused.assert_not_called()
 
     async def test_backup_requires_confirmation_and_replay_cannot_create_two_copies(self):
         c, u, ctx, m = await self.opened()
         # Forging a confirmation from a home keyboard must fail.
         self.callback(u, m, 'backup_yes')
-        with patch.object(worker, 'backup_command', new_callable=AsyncMock) as backup:
+        with patch.object(worker, 'start_panel_backup', new_callable=AsyncMock) as backup:
             await worker.callback_handler(u, ctx)
             backup.assert_not_awaited()
             self.callback(u, m, 'backup')
             await worker.callback_handler(u, ctx)
-            self.assertIn('non avvia il backup completo', m.edit_text.call_args.args[0])
+            self.assertIn('non avvia il backup completo', c.bot.edit_message_text.call_args.kwargs['text'])
             self.callback(u, m, 'backup_confirm')
             await worker.callback_handler(u, ctx)
             backup.assert_not_awaited()
             self.callback(u, m, 'backup_yes')
             await worker.callback_handler(u, ctx)
             backup.assert_awaited_once()
-            self.assertEqual(backup.call_args.args[1].args, [])
+            self.assertFalse(backup.call_args.kwargs['status_only'])
             await worker.callback_handler(u, ctx)
             backup.assert_awaited_once()
 
     async def test_backup_status_routes_read_only_option_and_cancel_does_not_create(self):
         c, u, ctx, m = await self.opened()
-        with patch.object(worker, 'backup_command', new_callable=AsyncMock) as backup:
+        with patch.object(worker, 'start_panel_backup', new_callable=AsyncMock) as backup:
             self.callback(u, m, 'backup')
             await worker.callback_handler(u, ctx)
             self.callback(u, m, 'backup_confirm')
@@ -182,7 +187,7 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
             backup.assert_not_awaited()
             self.callback(u, m, 'backup_status')
             await worker.callback_handler(u, ctx)
-            self.assertEqual(backup.call_args.args[1].args, ['stato'])
+            self.assertTrue(backup.call_args.kwargs['status_only'])
 
     def test_session_storage_is_bounded_and_invalid_data_is_rejected(self):
         sessions = PanelSessions()

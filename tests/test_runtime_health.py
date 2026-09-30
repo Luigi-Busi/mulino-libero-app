@@ -41,7 +41,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(data['service'], 'mugnaio')
 
     async def test_actual_queue_loop_updates_during_pause_and_stops_when_blocked(self):
-        coordinator = worker.Coordinator(SimpleNamespace(poll_seconds=.01), SimpleNamespace())
+        coordinator = worker.Coordinator(SimpleNamespace(poll_seconds=.01, admin_id=99), SimpleNamespace())
         coordinator.paused = True
         coordinator.sync_pending_outcomes = AsyncMock()
         coordinator.messages.drain = AsyncMock()
@@ -63,7 +63,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             coordinator.outcomes.close()
 
     async def test_human_wait_is_observed_without_losing_browser_check(self):
-        coordinator = worker.Coordinator(SimpleNamespace(), SimpleNamespace())
+        coordinator = worker.Coordinator(SimpleNamespace(admin_id=99), SimpleNamespace())
         coordinator.phone_future = asyncio.get_running_loop().create_future()
         coordinator.monitor_browser = SimpleNamespace(
             browser=SimpleNamespace(is_connected=lambda: True),

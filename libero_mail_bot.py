@@ -42,7 +42,7 @@ from zipfile import ZipFile, ZIP_DEFLATED
 import gspread
 from browser_diagnostics import BrowserDiagnostics, error_kind
 from runtime_health import HealthRequest, RuntimeHealth
-from telegram_panel import PanelSessions, controls_text, keyboard as panel_keyboard
+from telegram_panel import PanelReply, PanelSessions, ReusablePanel, controls_text, keyboard as panel_keyboard
 from dotenv import load_dotenv
 from gspread.utils import rowcol_to_a1
 from playwright.async_api import (
@@ -2158,7 +2158,13 @@ async def backup_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     coordinator.backup_task = asyncio.create_task(run_backup_command(coordinator, update.effective_message, bool(context.args)))
 
 
-async def run_backup_command(coordinator: Coordinator, message: Any, status_only: bool) -> None:
+async def run_backup_command(coordinator: Coordinator, message: Any, status_only: bool,
+                             *, panel_revision: Optional[int] = None) -> None:
+    async def notify(text: str, *, urgent: bool = False) -> None:
+        if panel_revision is None:
+            await message.reply_text(text)
+        else:
+            await finish_panel_backup(coordinator, text, panel_revision, urgent=urgent)
     try:
         async with coordinator.backup_lock:
             if status_only:
@@ -2176,24 +2182,29 @@ async def run_backup_command(coordinator: Coordinator, message: Any, status_only
                         lines.append(f"Attenzione: {invalid} copie piu recenti non leggibili o non valide.")
                 if coordinator.backup_error:
                     lines.append("L'ultimo tentativo di backup ha segnalato un problema. Usa /backup per riprovare.")
-                await message.reply_text("\n".join(lines))
+                await notify("\n".join(lines))
                 return
             coordinator.persist_before_backup()
             info = await asyncio.to_thread(coordinator.backups.create, "manual")
             coordinator.backup_error = not info["retention_ok"]
         rows = info["files"]["created-outcomes.sqlite3"]["database"]["rows"]
-        await message.reply_text(f"✅ Backup creato e verificato: {rows} esiti conservati.\n"
+        text = (f"✅ Backup creato e verificato: {rows} esiti conservati.\n"
             f"File: {info['filename']}\nCartella dati: backups/\n"
             "Conservazione: 14 copie automatiche e 3 manuali. La copia si trova sul VPS.")
-        if not info["retention_ok"]:
-            await message.reply_text("La copia e valida, ma non ho completato la pulizia dei vecchi backup. Controlla spazio e permessi del disco.")
+        warning = "La copia e valida, ma non ho completato la pulizia dei vecchi backup. Controlla spazio e permessi del disco."
+        if panel_revision is not None:
+            await notify(text + ('\n⚠️ ' + warning if not info['retention_ok'] else ''), urgent=not info['retention_ok'])
+        else:
+            await notify(text)
+            if not info['retention_ok']:
+                await notify(warning)
     except asyncio.CancelledError:
         raise
     except Exception as exc:
         coordinator.backup_error = True
         LOGGER.warning("Operazione backup non completata (%s)", type(exc).__name__)
         try:
-            await message.reply_text("❌ Operazione di backup non completata. Usa /backup stato per verificare le copie disponibili; controlla lo spazio e i permessi del VPS prima di riprovare.")
+            await notify("❌ Operazione di backup non completata. Usa /backup stato per verificare le copie disponibili; controlla lo spazio e i permessi del VPS prima di riprovare.", urgent=True)
         except TelegramError:
             LOGGER.warning("Notifica backup non recapitata")
 
@@ -2244,6 +2255,7 @@ class Coordinator:
         self.backup_error = False
         self.backup_notice_at = float("-inf")
         self.panel_sessions = PanelSessions()
+        self.panel = ReusablePanel(self.outcomes.db, settings.admin_id)
         self.health = RuntimeHealth('mugnaio', '/tmp/mulino-health/status.json')
         self.health.snapshot = self.health_snapshot
         self.last_queue_ok = None
@@ -3102,19 +3114,64 @@ def panel_status_text(coordinator: Coordinator) -> str:
     else:
         lines.append('Nessuna registrazione attiva.')
     lines.append(f'Caselle create in attesa di scrittura su Sheets: {coordinator.outcomes.pending_count()}.')
-    lines.append('Premi Stato per rileggere la situazione. I pulsanti scadono dopo 15 minuti o un riavvio: riapri con /menu.')
+    lines.append('Premi Stato per aggiornare, Chiudi per ridurre il pannello. /menu riapre lo stesso messaggio. Se un pulsante scade, premi Menu oppure usa /menu.')
     return '\n'.join(lines)
 
 
 async def render_admin_panel(coordinator: Coordinator, message: Any, *, text: Optional[str] = None,
-                             view: str = 'home', edit: bool = False) -> None:
-    token, actions, markup = panel_keyboard(coordinator.paused, view)
-    text = text or panel_status_text(coordinator)
-    if edit:
-        sent = await message.edit_text(text, reply_markup=markup, disable_web_page_preview=True)
-    else:
-        sent = await message.reply_text(text, reply_markup=markup, disable_web_page_preview=True)
-    coordinator.panel_sessions.remember(token, sent.chat.id, sent.message_id, actions)
+                             view: str = 'home', edit: bool = False,
+                             expected_revision: Optional[int] = None) -> Optional[int]:
+    panel = coordinator.panel
+    async with panel.lock:
+        if expected_revision is not None and panel.revision != expected_revision:
+            return None
+        token, actions, markup = panel_keyboard(coordinator.paused, view)
+        text = text or ('🌾 Pannello Mulino Libero — chiuso' if view == 'closed' else panel_status_text(coordinator))
+        if panel.persistence_error:
+            text += '\n⚠️ Non riesco a salvare il riferimento del pannello: dopo un riavvio potrebbe essere ricreato.'
+        message_id = panel.message_id(coordinator.bot.id)
+        sent = None
+        if message_id:
+            try:
+                sent = await coordinator.bot.edit_message_text(chat_id=coordinator.settings.admin_id,
+                    message_id=message_id, text=text, reply_markup=markup, disable_web_page_preview=True)
+            except BadRequest as exc:
+                # Only a definitively missing/uneditable message permits replacement.
+                if not any(reason in str(exc).lower() for reason in (
+                        'message to edit not found', "message can't be edited", 'message_id_invalid')):
+                    raise
+        if sent is None:
+            sent = await coordinator.bot.send_message(chat_id=coordinator.settings.admin_id,
+                text=text, reply_markup=markup, disable_web_page_preview=True)
+        if (panel.message_id(coordinator.bot.id) != sent.message_id or panel.persistence_error):
+            panel.bind(coordinator.bot.id, sent.message_id)
+        panel.revision += 1
+        panel.view = view
+        coordinator.panel_sessions.remember(token, sent.chat.id, sent.message_id, actions)
+        return panel.revision
+
+
+async def finish_panel_backup(coordinator: Coordinator, text: str, revision: int, *, urgent: bool = False) -> None:
+    coordinator.panel.backup_result = text
+    try:
+        await render_admin_panel(coordinator, None, text=text, view='backup', expected_revision=revision)
+    except TelegramError:
+        # Delivery failures must not turn a valid backup into a failed operation.
+        LOGGER.warning('Risultato backup disponibile, pannello non aggiornato')
+    if urgent:
+        await coordinator.safe_notice(coordinator.settings.admin_id, text)
+
+
+async def start_panel_backup(coordinator: Coordinator, *, status_only: bool) -> None:
+    if coordinator.backups is None:
+        await render_admin_panel(coordinator, None, text='Backup non disponibile: cartella dati persistente non configurata.', view='backup')
+        return
+    if coordinator.backup_lock.locked() or (coordinator.backup_task and not coordinator.backup_task.done()):
+        await render_admin_panel(coordinator, None, text='Operazione di backup già in corso. Attendi l’esito; poi premi Backup per rileggerlo.', view='backup')
+        return
+    text = 'Verifico le ultime copie…' if status_only else 'Creo e verifico il backup del registro. Il bot resta disponibile per SMS e CAPTCHA.'
+    revision = await render_admin_panel(coordinator, None, text=text, view='backup')
+    coordinator.backup_task = asyncio.create_task(run_backup_command(coordinator, None, status_only, panel_revision=revision))
 
 
 async def panel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3135,17 +3192,25 @@ async def panel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if (query.from_user.id != coordinator.settings.admin_id or not query.message
             or not getattr(query.message, 'is_accessible', True)
             or query.message.chat.type != ChatType.PRIVATE
-            or query.message.chat.id != coordinator.settings.admin_id):
+            or query.message.chat.id != coordinator.settings.admin_id
+            or not query.message.from_user or query.message.from_user.id != coordinator.bot.id):
         await query.answer('Pannello riservato alla chat privata del proprietario.', show_alert=True)
         return
+    if query.message.message_id != coordinator.panel.message_id(coordinator.bot.id):
+        await query.answer('Questo pannello è stato sostituito. Apri quello attuale con /menu.', show_alert=True)
+        return
     action = coordinator.panel_sessions.take(query.data, query.message.chat.id, query.message.message_id)
+    if action is None and isinstance(query.data, str) and re.fullmatch(r'panel:(?:home|open|close):[a-f0-9]{16}', query.data):
+        # Read-only navigation can refresh the current owner's panel after expiry/restart.
+        action = query.data.split(':')[1]
     if action is None:
         await query.answer('Pulsante scaduto o già usato. Riapri con /menu.', show_alert=True)
         return
     # Consume the message-bound capability before any await or side effect.
-    await query.answer()
+    await query.answer('Aggiorno il pannello…')
+    captured = PanelReply()
     adapted = SimpleNamespace(effective_user=query.from_user, effective_chat=query.message.chat,
-                              effective_message=query.message)
+                              effective_message=captured)
     command_context = SimpleNamespace(application=context.application, args=[])
     if action == 'controls':
         await render_admin_panel(coordinator, query.message, text=await asyncio.to_thread(controls_text), edit=True)
@@ -3155,7 +3220,8 @@ async def panel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             '💾 Backup del registro\n\n'
             'Qui puoi verificare o creare le copie locali di esiti e stato del Mugnaio sul VPS. '
             'La copia manuale non avvia il backup completo cifrato né il trasferimento sul PC. '
-            'Per controllare questi ultimi usa Controlli.'), view='backup', edit=True)
+            'Per controllare questi ultimi usa Controlli.'
+            + ('\n\nUltimo risultato:\n' + coordinator.panel.backup_result if coordinator.panel.backup_result else '')), view='backup', edit=True)
         return
     if action == 'backup_confirm':
         await render_admin_panel(coordinator, query.message, text=(
@@ -3164,15 +3230,21 @@ async def panel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             view='confirm_backup', edit=True)
         return
     if action in ('backup_status', 'backup_yes'):
-        command_context.args = ['stato'] if action == 'backup_status' else []
-        await backup_command(adapted, command_context)
+        await start_panel_backup(coordinator, status_only=action == 'backup_status')
+        return
+    elif action == 'close':
+        await render_admin_panel(coordinator, query.message, view='closed', edit=True)
+        return
     elif action == 'browser':
         await browser_command(adapted, command_context)
     elif action == 'pause':
         await pause_command(adapted, command_context)
     elif action == 'resume':
         await resume_command(adapted, command_context)
-    await render_admin_panel(coordinator, query.message, edit=True)
+    text = '\n'.join(captured.texts)
+    if action in ('pause', 'resume') and text:
+        text += '\n\n' + panel_status_text(coordinator)
+    await render_admin_panel(coordinator, query.message, text=text or None, edit=True)
 
 
 async def browser_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

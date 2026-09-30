@@ -1,5 +1,21 @@
 # Modifiche di Mulino Libero
 
+## v1.2.1 - 30 settembre 2026
+
+- Un unico messaggio del pannello, riutilizzato da /menu anche dopo riavvio;
+  riferimento numerico legato al proprietario e al bot nelle impostazioni esistenti.
+- Chiudi riduce il messaggio a una riga con Apri pannello; riapertura e Menu
+  aggiornano i pulsanti anche dopo scadenza, senza autorizzare azioni scadute.
+- Browser e pausa/ripresa mostrano l'esito nel pannello; backup in corso e
+  risultato usano lo stesso messaggio, senza risposte aggiuntive di routine.
+- Un risultato backup arrivato dopo una navigazione o chiusura resta consultabile
+  da Backup, senza sovrascrivere la pagina corrente. Errori importanti restano avvisi.
+- Ricreazione del messaggio solo se Telegram lo dichiara eliminato/non modificabile;
+  gli errori di rete conservano il riferimento e non duplicano il pannello.
+
+Schema dati, Compose, monitor e controller invariati. I comandi diretti continuano
+a rispondere come prima; nessuna pulizia retroattiva della chat o modifica a SMS/CAPTCHA.
+
 ## v1.2.0 - 30 settembre 2026
 
 - Pannello /menu (anche /pannello e /start in privato) per il proprietario:

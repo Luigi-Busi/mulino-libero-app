@@ -1,9 +1,11 @@
 """Private panel helpers; no network, shell, credentials or registration actions."""
 from datetime import datetime, timezone
+import asyncio
 import json
 from pathlib import Path
 import re
 import secrets
+import sqlite3
 import time
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -64,6 +66,50 @@ def controls_text(path=Path('/run/mulino-panel/status.json'), now=None):
         return '⚠️ Riepilogo dei controlli non disponibile o non valido. Non posso confermare lo stato dei servizi. Gli avvisi Healthchecks restano separati.'
 
 
+class ReusablePanel:
+    """Only numeric message ownership persists; views and jobs remain in memory."""
+    def __init__(self, db, owner):
+        self.db, self.owner = db, owner
+        self.pointer = None
+        self.persistence_error = False
+        self.lock = asyncio.Lock()
+        self.revision = 0
+        self.view = 'home'
+        self.backup_result = ''
+        try:
+            row = db.execute("SELECT value FROM runtime_settings WHERE key='admin_panel'").fetchone()
+            value = json.loads(row[0]) if row else None
+            if (isinstance(value, dict) and set(value) == {'owner', 'bot', 'message'}
+                    and all(type(v) is int and 0 < v < 2**63 for v in value.values())
+                    and value['owner'] == owner):
+                self.pointer = value
+        except (sqlite3.Error, ValueError, TypeError):
+            self.persistence_error = True
+
+    def message_id(self, bot):
+        return self.pointer['message'] if self.pointer and self.pointer['bot'] == bot else None
+
+    def bind(self, bot, message):
+        if not all(type(v) is int and 0 < v < 2**63 for v in (self.owner, bot, message)):
+            raise ValueError('Invalid panel ownership')
+        self.pointer = dict(owner=self.owner, bot=bot, message=message)
+        try:
+            self.db.execute("INSERT INTO runtime_settings(key,value) VALUES ('admin_panel',?) "
+                            "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (json.dumps(self.pointer),))
+            self.persistence_error = False
+        except sqlite3.Error:
+            self.persistence_error = True
+
+
+class PanelReply:
+    """Capture existing command output for the panel; never send a new message."""
+    def __init__(self):
+        self.texts = []
+
+    async def reply_text(self, text, **kwargs):
+        self.texts.append(text)
+
+
 class PanelSessions:
     """Bounded, short-lived, message-bound, one-use keyboard capabilities."""
     def __init__(self):
@@ -94,6 +140,9 @@ class PanelSessions:
 def keyboard(paused, view='home'):
     token = secrets.token_hex(8)
     rows = []
+    if view == 'closed':
+        markup = InlineKeyboardMarkup([[InlineKeyboardButton('🌾 Apri pannello', callback_data=f'panel:open:{token}')]])
+        return token, {'open'}, markup
     if view == 'confirm_backup':
         rows.append([('✅ Crea copia del registro', 'backup_yes'), ('↩️ Annulla', 'backup')])
     elif view == 'backup':
@@ -103,6 +152,7 @@ def keyboard(paused, view='home'):
         [('📊 Stato', 'status'), ('▶️ Riprendi', 'resume') if paused else ('⏸ Pausa', 'pause')],
         [('🌐 Browser remoto', 'browser'), ('🩺 Controlli', 'controls')],
         [('💾 Backup', 'backup'), ('🔄 Menu', 'home')],
+        [('✖️ Chiudi', 'close')],
     ])
     actions = {action for row in rows for _, action in row}
     markup = InlineKeyboardMarkup([[InlineKeyboardButton(label, callback_data=f'panel:{action}:{token}')
