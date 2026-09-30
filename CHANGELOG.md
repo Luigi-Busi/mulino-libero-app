@@ -1,5 +1,20 @@
 # Modifiche di Mulino Libero
 
+## v1.2.0 - 30 settembre 2026
+
+- Pannello /menu (anche /pannello e /start in privato) per il proprietario:
+  stato, pausa/ripresa, browser, controlli e backup del registro.
+- Pulsanti vincolati al messaggio, con scadenza di 15 minuti e consumo singolo;
+  conferma separata per la copia manuale, senza duplicazioni da doppio clic.
+- Il monitor pubblica solo sette codici e l'orario in una directory dedicata,
+  montata in sola lettura. Dati mancanti, non validi o vecchi sono segnalati.
+- Il deploy ammette solo questo bind aggiuntivo e verifica modulo e VERSION;
+  rollback compatibile con le release precedenti.
+
+Nessuna migrazione, nuova porta, dipendenza o modifica ai segreti. Il backup
+manuale è la copia locale del registro già esistente; il backup completo cifrato
+e il trasferimento PC rimangono nei servizi indipendenti. Guida: ops/panel/README.md.
+
 ## v1.1.2 - 30 settembre 2026
 
 - Diagnostica delle fasi e di chiusura/crash pagina, contesto e browser, con

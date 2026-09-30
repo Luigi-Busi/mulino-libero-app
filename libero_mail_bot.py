@@ -35,12 +35,14 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Optional
+from types import SimpleNamespace
 from urllib.parse import urlsplit, urlunsplit
 from zipfile import ZipFile, ZIP_DEFLATED
 
 import gspread
 from browser_diagnostics import BrowserDiagnostics, error_kind
 from runtime_health import HealthRequest, RuntimeHealth
+from telegram_panel import PanelSessions, controls_text, keyboard as panel_keyboard
 from dotenv import load_dotenv
 from gspread.utils import rowcol_to_a1
 from playwright.async_api import (
@@ -2241,6 +2243,7 @@ class Coordinator:
         self.backup_task: Optional[asyncio.Task] = None
         self.backup_error = False
         self.backup_notice_at = float("-inf")
+        self.panel_sessions = PanelSessions()
         self.health = RuntimeHealth('mugnaio', '/tmp/mulino-health/status.json')
         self.health.snapshot = self.health_snapshot
         self.last_queue_ok = None
@@ -3065,6 +3068,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     user = update.effective_user
     if not user or not update.effective_chat:
         return
+    if user.id == coordinator.settings.admin_id and update.effective_chat.type == ChatType.PRIVATE:
+        await panel_command(update, context)
+        return
     whitelist = await asyncio.to_thread(coordinator.store.whitelist_map)
     if user.id == coordinator.settings.admin_id or user.id in whitelist:
         await update.effective_message.reply_text(
@@ -3077,6 +3083,96 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             "⛔ Il tuo Telegram ID non è presente nella whitelist.\n"
             f"ID: {user.id}"
         )
+
+
+def panel_status_text(coordinator: Coordinator) -> str:
+    try:
+        version = Path(__file__).with_name('VERSION').read_text().strip()
+        if not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', version):
+            raise ValueError('version')
+    except (OSError, ValueError):
+        version = 'non disponibile'
+    lines = ['🌾 Mulino Libero — pannello privato', 'Versione: ' + version,
+             coordinator.queue_status_text()]
+    if coordinator.active:
+        lines.extend([f'Richiesta attiva: {coordinator.active.request_id}',
+                      f'Stato: {coordinator.active.status}'])
+    elif coordinator.registration_busy():
+        lines.append('Registrazione in avvio o chiusura: attendi prima di aggiornare.')
+    else:
+        lines.append('Nessuna registrazione attiva.')
+    lines.append(f'Caselle create in attesa di scrittura su Sheets: {coordinator.outcomes.pending_count()}.')
+    lines.append('Premi Stato per rileggere la situazione. I pulsanti scadono dopo 15 minuti o un riavvio: riapri con /menu.')
+    return '\n'.join(lines)
+
+
+async def render_admin_panel(coordinator: Coordinator, message: Any, *, text: Optional[str] = None,
+                             view: str = 'home', edit: bool = False) -> None:
+    token, actions, markup = panel_keyboard(coordinator.paused, view)
+    text = text or panel_status_text(coordinator)
+    if edit:
+        sent = await message.edit_text(text, reply_markup=markup, disable_web_page_preview=True)
+    else:
+        sent = await message.reply_text(text, reply_markup=markup, disable_web_page_preview=True)
+    coordinator.panel_sessions.remember(token, sent.chat.id, sent.message_id, actions)
+
+
+async def panel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    coordinator: Coordinator = context.application.bot_data['coordinator']
+    if (not update.effective_user or not update.effective_chat or not update.effective_message
+            or update.effective_user.id != coordinator.settings.admin_id
+            or update.effective_chat.type != ChatType.PRIVATE
+            or update.effective_chat.id != coordinator.settings.admin_id):
+        return
+    await render_admin_panel(coordinator, update.effective_message)
+
+
+async def panel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    coordinator: Coordinator = context.application.bot_data['coordinator']
+    query = update.callback_query
+    if not query or not query.from_user:
+        return
+    if (query.from_user.id != coordinator.settings.admin_id or not query.message
+            or not getattr(query.message, 'is_accessible', True)
+            or query.message.chat.type != ChatType.PRIVATE
+            or query.message.chat.id != coordinator.settings.admin_id):
+        await query.answer('Pannello riservato alla chat privata del proprietario.', show_alert=True)
+        return
+    action = coordinator.panel_sessions.take(query.data, query.message.chat.id, query.message.message_id)
+    if action is None:
+        await query.answer('Pulsante scaduto o già usato. Riapri con /menu.', show_alert=True)
+        return
+    # Consume the message-bound capability before any await or side effect.
+    await query.answer()
+    adapted = SimpleNamespace(effective_user=query.from_user, effective_chat=query.message.chat,
+                              effective_message=query.message)
+    command_context = SimpleNamespace(application=context.application, args=[])
+    if action == 'controls':
+        await render_admin_panel(coordinator, query.message, text=await asyncio.to_thread(controls_text), edit=True)
+        return
+    if action == 'backup':
+        await render_admin_panel(coordinator, query.message, text=(
+            '💾 Backup del registro\n\n'
+            'Qui puoi verificare o creare le copie locali di esiti e stato del Mugnaio sul VPS. '
+            'La copia manuale non avvia il backup completo cifrato né il trasferimento sul PC. '
+            'Per controllare questi ultimi usa Controlli.'), view='backup', edit=True)
+        return
+    if action == 'backup_confirm':
+        await render_admin_panel(coordinator, query.message, text=(
+            'Creare e verificare una copia manuale del registro sul VPS? '
+            'Saranno conservate le tre copie manuali più recenti. Il bot resta disponibile.'),
+            view='confirm_backup', edit=True)
+        return
+    if action in ('backup_status', 'backup_yes'):
+        command_context.args = ['stato'] if action == 'backup_status' else []
+        await backup_command(adapted, command_context)
+    elif action == 'browser':
+        await browser_command(adapted, command_context)
+    elif action == 'pause':
+        await pause_command(adapted, command_context)
+    elif action == 'resume':
+        await resume_command(adapted, command_context)
+    await render_admin_panel(coordinator, query.message, edit=True)
 
 
 async def browser_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3533,6 +3629,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
     data = query.data or ""
 
+    if isinstance(data, str) and data.startswith('panel:'):
+        await panel_callback(update, context)
+        return
+
     if data.startswith("rec:"):
         await recovery_callback(update, context)
         return
@@ -3850,6 +3950,7 @@ def main() -> None:
     application.bot_data["coordinator"] = coordinator
     application.add_error_handler(error_handler)
     application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler(["menu", "pannello"], panel_command))
     application.add_handler(CommandHandler("id", id_command))
     application.add_handler(CommandHandler("idgruppo", group_id_command))
     application.add_handler(CommandHandler("stato", status_command))

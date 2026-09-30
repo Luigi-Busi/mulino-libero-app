@@ -45,6 +45,28 @@ def browser_url_only_change(before, after):
 
 
 INTERRUPTS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+PANEL_BIND = (b'      - type: bind\n'
+              b'        source: /var/lib/mulino-monitor/panel\n'
+              b'        target: /run/mulino-panel\n'
+              b'        read_only: true\n'
+              b'        bind:\n'
+              b'          create_host_path: false\n')
+
+
+def reviewed_compose_change(before, after):
+    def strip_panel(value):
+        if value.count(PANEL_BIND) > 1:
+            return None
+        if PANEL_BIND in value:
+            anchor = b'      - ../data:/data\n' + PANEL_BIND
+            if value.count(anchor) != 1:
+                return None
+            value = value.replace(anchor, b'      - ../data:/data\n', 1)
+        return value
+    old, new = strip_panel(before), strip_panel(after)
+    return old is not None and new is not None and browser_url_only_change(old, new)
+
+
 HEALTH = r'''
 from pathlib import Path
 import urllib.request
@@ -246,8 +268,17 @@ class Manager:
             raise Failure('Questa procedura gestisce soltanto il servizio Docker del Mugnaio.')
         service = model['services'][self.c.service]
         volumes = service.get('volumes', [])
-        if len(volumes) != 1 or volumes[0].get('type') != 'bind' or volumes[0].get('source') != str(self.c.data) or volumes[0].get('target') != '/data':
+        data = [v for v in volumes if v.get('target') == '/data']
+        panel = [v for v in volumes if v.get('target') == '/run/mulino-panel']
+        if (len(data) != 1 or data[0].get('type') != 'bind' or data[0].get('source') != str(self.c.data)
+                or data[0].get('read_only', False) is not False or len(volumes) != 1 + len(panel)
+                or len(panel) > 1):
             raise Failure('Il volume dati non coincide con il percorso previsto.')
+        if panel and (panel[0].get('type') != 'bind'
+                      or panel[0].get('source') != '/var/lib/mulino-monitor/panel'
+                      or panel[0].get('read_only') is not True
+                      or panel[0].get('bind', {}).get('create_host_path') is not False):
+            raise Failure('Il riepilogo del pannello deve essere il bind previsto in sola lettura.')
         for secret in model.get('secrets', {}).values():
             if Path(secret['file']).parent != self.c.secrets:
                 raise Failure('Percorso di un segreto non previsto.')
@@ -283,6 +314,9 @@ class Manager:
             raise Failure('Il container non coincide con la release/progetto registrati.')
         expected = {(str(self.c.data), '/data', True)}
         model = self.model()
+        for volume in model['services'][self.c.service].get('volumes', []):
+            if volume.get('target') == '/run/mulino-panel':
+                expected.add((volume['source'], volume['target'], False))
         for secret in model['services'][self.c.service].get('secrets', []):
             expected.add((model['secrets'][secret['source']]['file'], '/run/secrets/' + secret['target'], False))
         actual = {(v['Source'], v['Destination'], v['RW']) for v in container['Mounts']}
@@ -364,7 +398,9 @@ class Manager:
                 self.run(['docker', 'rm', '-f', name])
 
     def image_files(self, source):
-        optional = tuple(name for name in ('runtime_health.py', 'browser_diagnostics.py') if (source / name).is_file())
+        optional = tuple(name for name in ('runtime_health.py', 'browser_diagnostics.py', 'telegram_panel.py') if (source / name).is_file())
+        if (source / 'telegram_panel.py').is_file():
+            optional += ('VERSION',)
         return self.c.image_files + optional
 
     def verify_image(self, record, source):
@@ -445,7 +481,7 @@ class Manager:
         baseline = self.source(state['current']['sha'])
         for name in self.c.frozen_files:
             before, after = (baseline / name).read_bytes(), (source / name).read_bytes()
-            allowed = (browser_url_only_change(before, after) if name == 'docker-compose.yml' else before == after)
+            allowed = (reviewed_compose_change(before, after) if name == 'docker-compose.yml' else before == after)
             if not allowed:
                 raise Failure('Modifica da gestire separatamente: ' + name)
         if sha == state['current']['sha']:

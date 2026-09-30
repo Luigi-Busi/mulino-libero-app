@@ -74,6 +74,21 @@ def age_good(stamp, now, maximum):
             and 0 <= now - stamp <= maximum)
 
 
+def publish_panel(report):
+    """Expose only static status codes and time, never configuration or receipts."""
+    components = {'mugnaio', 'browser', 'risponditore', 'disco',
+                  'backup_creazione', 'backup_esportazione', 'backup_pc'}
+    if set(report['codes']) != components or any(not isinstance(v, str) or not re.fullmatch(r'[A-Z_]{2,40}', v)
+                                                 for v in report['codes'].values()):
+        raise ValueError('Invalid panel report')
+    directory = ROOT / 'panel'
+    if directory.is_symlink():
+        raise ValueError('Symlink rejected')
+    directory.mkdir(mode=0o700, exist_ok=True)
+    os.chmod(directory, 0o700)
+    write_json(directory / 'status.json', dict(schema=1, checked_utc=report['checked_utc'], codes=report['codes']))
+
+
 def runtime_problem(data, service, running, now):
     if not running:
         return 'PROCESSO_FERMO'
@@ -248,7 +263,13 @@ def main():
         ping(config['ping_url'], bool(failed), body)
         state['hash_cache'] = cache
         write_json(ROOT / 'state.json', state)
-        write_json(ROOT / 'latest.json', dict(checked_utc=datetime.now(timezone.utc).isoformat(), **report))
+        latest = dict(checked_utc=datetime.now(timezone.utc).isoformat(), **report)
+        write_json(ROOT / 'latest.json', latest)
+        try:
+            publish_panel(latest)
+        except (OSError, ValueError, TypeError, KeyError):
+            # A panel export problem must not suppress the existing external heartbeat.
+            print('Riepilogo pannello non aggiornato; monitor indipendente completato.')
     print(json.dumps(report, sort_keys=True))
 
 

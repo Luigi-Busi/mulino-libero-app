@@ -28,6 +28,8 @@ RUN python -m pip install --no-cache-dir -r /app/requirements.txt \
 COPY libero_mail_bot.py /app/libero_mail_bot.py
 COPY runtime_health.py /app/runtime_health.py
 COPY browser_diagnostics.py /app/browser_diagnostics.py
+COPY telegram_panel.py /app/telegram_panel.py
+COPY VERSION /app/VERSION
 COPY start.sh /app/start.sh
 
 RUN chmod 0755 /app/start.sh \

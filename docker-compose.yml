@@ -31,6 +31,12 @@ services:
         target: vnc-password
     volumes:
       - ../data:/data
+      - type: bind
+        source: /var/lib/mulino-monitor/panel
+        target: /run/mulino-panel
+        read_only: true
+        bind:
+          create_host_path: false
     # noVNC resta raggiungibile soltanto dal server stesso.
     # Non esporlo direttamente su Internet: usa un tunnel privato/VPN.
     ports:
