@@ -32,7 +32,8 @@ import time
 import unicodedata
 from contextlib import closing
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timezone
+from zoneinfo import ZoneInfo
 from pathlib import Path
 from typing import Any, Optional
 from types import SimpleNamespace
@@ -1326,6 +1327,7 @@ class RegistrationBrowser:
                 pass
             result = await self._wait_for_otp_outcome(request, previous_feedback)
             if result == "success":
+                self.coordinator.mark_sms_verified(request)
                 return
             await self.coordinator.retry_otp(request, expired=result == "expired")
 
@@ -1830,6 +1832,76 @@ def build_consistency_report(snapshot: dict, outcomes: dict, active_id: str = ""
             "legacy": sum(not r.account_id for r, _, _ in records)}
 
 
+class TesterLedger:
+    """Append-only completions and reset boundaries in the outcome database."""
+    def __init__(self, db):
+        self.db = db
+        db.execute("""CREATE TABLE IF NOT EXISTS tester_completions (
+            seq INTEGER PRIMARY KEY AUTOINCREMENT, request_id TEXT NOT NULL UNIQUE,
+            tester_id INTEGER NOT NULL CHECK(tester_id>0),
+            verified_at TEXT NOT NULL, completed_at TEXT NOT NULL)""")
+        db.execute("CREATE INDEX IF NOT EXISTS tester_user_seq ON tester_completions(tester_id,seq)")
+        db.execute("""CREATE TABLE IF NOT EXISTS tester_resets (
+            seq INTEGER PRIMARY KEY AUTOINCREMENT, tester_id INTEGER NOT NULL CHECK(tester_id>0),
+            cutoff INTEGER NOT NULL, reset_at TEXT NOT NULL, admin_id INTEGER NOT NULL)""")
+        db.execute("CREATE INDEX IF NOT EXISTS tester_reset_user ON tester_resets(tester_id,seq)")
+        db.execute("INSERT OR IGNORE INTO runtime_settings(key,value) VALUES ('tester_counting_started',?)",
+                   (self.now(),))
+
+    @staticmethod
+    def now():
+        return datetime.now(timezone.utc).isoformat(timespec='seconds')
+
+    @staticmethod
+    def valid_id(value):
+        return type(value) is int and 0 < value < 2**63
+
+    def credit(self, request_id, tester_id, verified_at):
+        # Called only inside the transaction inserting a NEW confirmed outcome.
+        if not self.valid_id(tester_id):
+            raise ValueError('Invalid tester ID')
+        proof = datetime.fromisoformat(verified_at)
+        if proof.tzinfo is None:
+            raise ValueError('Invalid verification timestamp')
+        self.db.execute("INSERT INTO tester_completions(request_id,tester_id,verified_at,completed_at) VALUES (?,?,?,?)",
+                        (request_id, tester_id, verified_at, self.now()))
+
+    def known_ids(self):
+        return {r[0] for r in self.db.execute(
+            'SELECT tester_id FROM tester_completions UNION SELECT tester_id FROM tester_resets')}
+
+    def stats(self, tester_id):
+        if not self.valid_id(tester_id):
+            raise ValueError('Invalid tester ID')
+        reset = self.db.execute('SELECT seq,cutoff,reset_at FROM tester_resets WHERE tester_id=? ORDER BY seq DESC LIMIT 1',
+                                (tester_id,)).fetchone()
+        reset_seq, cutoff, started = reset if reset else (0, 0,
+            self.db.execute("SELECT value FROM runtime_settings WHERE key='tester_counting_started'").fetchone()[0])
+        count, last_seq = self.db.execute(
+            'SELECT COUNT(*),COALESCE(MAX(seq),0) FROM tester_completions WHERE tester_id=? AND seq>?',
+            (tester_id, cutoff)).fetchone()
+        total = self.db.execute('SELECT COUNT(*) FROM tester_completions WHERE tester_id=?', (tester_id,)).fetchone()[0]
+        return dict(tester_id=tester_id, count=count, total=total, started=started,
+                    snapshot=(count, last_seq, reset_seq))
+
+    def reset(self, tester_id, admin_id, expected):
+        if not self.valid_id(admin_id):
+            raise ValueError('Invalid admin ID')
+        self.db.execute('SAVEPOINT tester_reset')
+        try:
+            current = self.stats(tester_id)
+            if tuple(expected) != current['snapshot']:
+                raise RegistrationError('Conteggio cambiato: rileggi il tester e conferma nuovamente.')
+            cutoff = self.db.execute('SELECT COALESCE(MAX(seq),0) FROM tester_completions').fetchone()[0]
+            self.db.execute('INSERT INTO tester_resets(tester_id,cutoff,reset_at,admin_id) VALUES (?,?,?,?)',
+                            (tester_id, cutoff, self.now(), admin_id))
+            self.db.execute('RELEASE tester_reset')
+        except BaseException:
+            self.db.execute('ROLLBACK TO tester_reset')
+            self.db.execute('RELEASE tester_reset')
+            raise
+
+
 class CreatedOutcomes:
     """Esiti durevoli: un errore Sheets non deve riaprire il browser."""
 
@@ -1848,6 +1920,7 @@ class CreatedOutcomes:
             synced INTEGER NOT NULL DEFAULT 0, attempts INTEGER NOT NULL DEFAULT 0,
             next_try REAL NOT NULL DEFAULT 0)""")
         self.db.execute("CREATE TABLE IF NOT EXISTS runtime_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        self.testers = TesterLedger(self.db)
 
     def queue_paused(self) -> bool:
         row = self.db.execute("SELECT value FROM runtime_settings WHERE key='queue_paused'").fetchone()
@@ -1858,7 +1931,7 @@ class CreatedOutcomes:
                         "ON CONFLICT(key) DO UPDATE SET value=excluded.value", ("1" if paused else "0",))
 
 
-    def save(self, request: QueueRequest, username: str, email: str) -> None:
+    def save(self, request: QueueRequest, username: str, email: str, *, sms_proof=None) -> None:
         previous = self.get(request.request_id)
         if previous:
             if previous[1:3] != (username, email):
@@ -1868,8 +1941,20 @@ class CreatedOutcomes:
                  "destination_row", "email_column", "claimed_by", "account_id")
         payload = {name: getattr(request, name) for name in names}
         payload.update(full_name="", status="CREATA_DA_SALVARE")
-        self.db.execute("INSERT INTO outcomes(request_id,request_json,username,email) VALUES (?,?,?,?)",
-                        (request.request_id, json.dumps(payload), username, email))
+        self.db.execute('SAVEPOINT outcome_with_tester')
+        try:
+            self.db.execute("INSERT INTO outcomes(request_id,request_json,username,email) VALUES (?,?,?,?)",
+                            (request.request_id, json.dumps(payload), username, email))
+            if sms_proof is not None:
+                tester_id, verified_at = sms_proof
+                if str(tester_id) != request.claimed_by:
+                    raise RegistrationError('Il tester della verifica non coincide con quello assegnato.')
+                self.testers.credit(request.request_id, tester_id, verified_at)
+            self.db.execute('RELEASE outcome_with_tester')
+        except BaseException:
+            self.db.execute('ROLLBACK TO outcome_with_tester')
+            self.db.execute('RELEASE outcome_with_tester')
+            raise
 
     def get(self, request_id: str) -> Any:
         row = self.db.execute("SELECT request_json,username,email,synced FROM outcomes WHERE request_id=?",
@@ -2246,6 +2331,7 @@ class Coordinator:
         self.paused = self.outcomes.queue_paused()
         self.pause_persisted = True
         self.created_in_memory: dict[str, Any] = {}
+        self.sms_verified: dict[str, tuple[int, str]] = {}
         self._sync_lock = asyncio.Lock()
         self.recovery_pending = False
         data_dir = getattr(settings, "data_dir", None)
@@ -2356,8 +2442,17 @@ class Coordinator:
 
     def record_created(self, request: QueueRequest, username: str, email: str) -> None:
         self.created_in_memory[request.request_id] = (request, username, email)
-        self.outcomes.save(request, username, email)
+        self.outcomes.save(request, username, email, sms_proof=self.sms_verified.get(request.request_id))
         self.created_in_memory.pop(request.request_id, None)
+        self.sms_verified.pop(request.request_id, None)
+
+    def mark_sms_verified(self, request: QueueRequest) -> None:
+        # Success page after an OTP submitted by the currently assigned tester.
+        tester = int(request.claimed_by) if request.claimed_by.isdecimal() else 0
+        if (self.active is not request or not TesterLedger.valid_id(tester)
+                or not self.assigned_phone or tester in self.revoked_testers):
+            raise RegistrationError('Verifica SMS senza un tester valido: attribuzione bloccata.')
+        self.sms_verified[request.request_id] = (tester, TesterLedger.now())
 
     async def safe_notice(self, chat_id: int, text: str) -> None:
         try:
@@ -2489,6 +2584,7 @@ class Coordinator:
             await self.sync_pending_outcomes()
             return
         self.active = request
+        self.sms_verified.pop(request.request_id, None)
         self.change_tester_event.clear()
         self.change_tester_allowed = False
         self.claim_token = self.assignment_token = self.assigned_phone = ""
@@ -3120,12 +3216,13 @@ def panel_status_text(coordinator: Coordinator) -> str:
 
 async def render_admin_panel(coordinator: Coordinator, message: Any, *, text: Optional[str] = None,
                              view: str = 'home', edit: bool = False,
-                             expected_revision: Optional[int] = None) -> Optional[int]:
+                             expected_revision: Optional[int] = None, extra_rows=(),
+                             session_payload=None) -> Optional[int]:
     panel = coordinator.panel
     async with panel.lock:
         if expected_revision is not None and panel.revision != expected_revision:
             return None
-        token, actions, markup = panel_keyboard(coordinator.paused, view)
+        token, actions, markup = panel_keyboard(coordinator.paused, view, extra_rows=extra_rows)
         text = text or ('🌾 Pannello Mulino Libero — chiuso' if view == 'closed' else panel_status_text(coordinator))
         if panel.persistence_error:
             text += '\n⚠️ Non riesco a salvare il riferimento del pannello: dopo un riavvio potrebbe essere ricreato.'
@@ -3147,7 +3244,7 @@ async def render_admin_panel(coordinator: Coordinator, message: Any, *, text: Op
             panel.bind(coordinator.bot.id, sent.message_id)
         panel.revision += 1
         panel.view = view
-        coordinator.panel_sessions.remember(token, sent.chat.id, sent.message_id, actions)
+        coordinator.panel_sessions.remember(token, sent.chat.id, sent.message_id, actions, payload=session_payload)
         return panel.revision
 
 
@@ -3199,6 +3296,8 @@ async def panel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if query.message.message_id != coordinator.panel.message_id(coordinator.bot.id):
         await query.answer('Questo pannello è stato sostituito. Apri quello attuale con /menu.', show_alert=True)
         return
+    session_token = query.data.rsplit(':', 1)[-1] if isinstance(query.data, str) else ''
+    tester_payload = coordinator.panel_sessions.entries.get(session_token, {}).get('payload')
     action = coordinator.panel_sessions.take(query.data, query.message.chat.id, query.message.message_id)
     if action is None and isinstance(query.data, str) and re.fullmatch(r'panel:(?:home|open|close):[a-f0-9]{16}', query.data):
         # Read-only navigation can refresh the current owner's panel after expiry/restart.
@@ -3212,6 +3311,9 @@ async def panel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     adapted = SimpleNamespace(effective_user=query.from_user, effective_chat=query.message.chat,
                               effective_message=captured)
     command_context = SimpleNamespace(application=context.application, args=[])
+    if action == 'testers' or action.startswith('tester_'):
+        await tester_panel_action(coordinator, query.message, action, tester_payload)
+        return
     if action == 'controls':
         await render_admin_panel(coordinator, query.message, text=await asyncio.to_thread(controls_text), edit=True)
         return
@@ -3245,6 +3347,129 @@ async def panel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if action in ('pause', 'resume') and text:
         text += '\n\n' + panel_status_text(coordinator)
     await render_admin_panel(coordinator, query.message, text=text or None, edit=True)
+
+
+async def tester_ids(coordinator):
+    known = coordinator.outcomes.testers.known_ids()
+    try:
+        whitelist = await asyncio.to_thread(coordinator.store.whitelist_map)
+        ids = {i for i in whitelist if TesterLedger.valid_id(i)}
+        return sorted(known | ids), True
+    except Exception:
+        # Never expose the sheet, phone numbers or provider error text.
+        return sorted(known), False
+
+
+def tester_detail_text(stats):
+    started = datetime.fromisoformat(stats['started']).astimezone(ZoneInfo('Europe/Rome'))
+    return (f"👤 Tester — ID {stats['tester_id']}\n\n"
+            f"Operazioni completate: {stats['count']}\n"
+            f"Conteggio iniziato: {started.strftime('%d/%m/%Y %H:%M:%S')} (Italia)\n"
+            f"Totale nello storico: {stats['total']}\n\n"
+            "Conta solo nuove registrazioni riuscite con verifica SMS riconosciuta. "
+            "I recuperi manuali senza questa prova e le caselle senza SMS non aggiungono crediti.")
+
+
+async def show_tester_list(coordinator, message, page=0):
+    ids, complete = await tester_ids(coordinator)
+    pages = max(1, (len(ids) + 9) // 10)
+    page = max(0, min(int(page), pages - 1))
+    selected = ids[page*10:(page+1)*10]
+    payload, rows, lines = {}, [], ['👥 Tester — completamenti SMS', f'Pagina {page+1}/{pages}']
+    for index, tester in enumerate(selected):
+        count = coordinator.outcomes.testers.stats(tester)['count']
+        action = f'tester_select_{index}'
+        payload[action] = tester
+        rows.append([(f'ID {tester} · {count}', action)])
+    if not ids:
+        lines.append('Nessun tester disponibile.')
+    if not complete:
+        lines.append('⚠️ Whitelist non raggiungibile: elenco limitato ai tester già registrati.')
+    navigation = []
+    for label, action, destination in (('⬅️ Precedenti', 'tester_prev', page-1),
+                                       ('➡️ Successivi', 'tester_next', page+1)):
+        if 0 <= destination < pages:
+            navigation.append((label, action))
+            payload[action] = destination
+    if navigation:
+        rows.append(navigation)
+    lines.append('Seleziona un ID per dettagli e azzeramento. /conteggio ID e /azzera ID sono disponibili solo qui in privato.')
+    await render_admin_panel(coordinator, message, text='\n'.join(lines), view='testers',
+                             extra_rows=rows, session_payload=payload)
+
+
+async def show_tester_detail(coordinator, message, tester, *, confirm=False, notice=''):
+    stats = coordinator.outcomes.testers.stats(tester)
+    payload = dict(tester=tester, snapshot=stats['snapshot'])
+    text = tester_detail_text(stats)
+    if confirm:
+        text = (f"Azzerare il conteggio del tester ID {tester}?\n"
+                f"Operazioni da azzerare: {stats['count']}.\n"
+                "Ripartirà da zero; lo storico e gli altri tester saranno conservati.\n\n" + text)
+        rows = [[('✅ Conferma azzeramento', 'tester_reset_yes'), ('↩️ Annulla', 'tester_detail')]]
+    else:
+        rows = [[('🗑 Azzera questo tester', 'tester_reset'), ('🔄 Aggiorna', 'tester_detail')]]
+    rows.append([('👥 Elenco tester', 'testers')])
+    await render_admin_panel(coordinator, message, text=(notice+'\n\n' if notice else '')+text,
+                             view='tester_confirm' if confirm else 'tester_detail',
+                             extra_rows=rows, session_payload=payload)
+
+
+async def tester_panel_action(coordinator, message, action, payload):
+    try:
+        if action == 'testers':
+            await show_tester_list(coordinator, message)
+        elif action in ('tester_next', 'tester_prev') and payload and action in payload:
+            await show_tester_list(coordinator, message, payload[action])
+        elif action.startswith('tester_select_') and payload and action in payload:
+            await show_tester_detail(coordinator, message, payload[action])
+        elif action in ('tester_detail', 'tester_reset', 'tester_reset_yes') and payload and 'tester' in payload:
+            tester = payload['tester']
+            notice = ''
+            if action == 'tester_reset_yes':
+                try:
+                    coordinator.outcomes.testers.reset(tester, coordinator.settings.admin_id, payload['snapshot'])
+                    notice = '✅ Conteggio azzerato. Storico conservato.'
+                except RegistrationError:
+                    notice = '⚠️ Conteggio cambiato: verifica i nuovi dati e richiedi nuovamente l’azzeramento.'
+            await show_tester_detail(coordinator, message, tester, confirm=action == 'tester_reset', notice=notice)
+        else:
+            await render_admin_panel(coordinator, message, text='Selezione non più disponibile. Premi Tester per aggiornare.')
+    except (sqlite3.Error, ValueError, TypeError):
+        await render_admin_panel(coordinator, message, text='⚠️ Registro tester non disponibile. Non posso confermare il conteggio o l’azzeramento. Riprova da Tester.')
+
+
+async def tester_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    coordinator = context.application.bot_data['coordinator']
+    if (not update.effective_user or not update.effective_chat or not update.effective_message
+            or update.effective_user.id != coordinator.settings.admin_id
+            or update.effective_chat.type != ChatType.PRIVATE
+            or update.effective_chat.id != coordinator.settings.admin_id):
+        return
+    words = (getattr(update.effective_message, 'text', '') or '').split()
+    name = words[0].split('@')[0].lower() if words else ''
+    args = context.args
+    try:
+        if name == '/conteggi' and not args:
+            await show_tester_list(coordinator, update.effective_message)
+            return
+        if name not in ('/conteggio', '/azzera') or len(args) != 1 or not re.fullmatch(r'[1-9][0-9]{0,18}', args[0]):
+            await render_admin_panel(coordinator, update.effective_message,
+                text='Usa /conteggi, /conteggio ID_TELEGRAM oppure /azzera ID_TELEGRAM. Per conoscere il proprio ID il tester può usare /id.')
+            return
+        tester = int(args[0])
+        if not TesterLedger.valid_id(tester):
+            raise ValueError('ID out of range')
+        ids, complete = await tester_ids(coordinator)
+        if tester not in ids:
+            await render_admin_panel(coordinator, update.effective_message,
+                text=('Tester non presente nella whitelist o nello storico.' if complete else
+                      'Whitelist non raggiungibile e tester assente dallo storico: non posso verificarlo.'))
+            return
+        await show_tester_detail(coordinator, update.effective_message, tester, confirm=name == '/azzera')
+    except (sqlite3.Error, ValueError, TypeError):
+        await render_admin_panel(coordinator, update.effective_message,
+            text='⚠️ ID o registro non disponibile. Nessun azzeramento confermato. Premi Tester per aggiornare.')
 
 
 async def browser_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -4023,6 +4248,7 @@ def main() -> None:
     application.add_error_handler(error_handler)
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler(["menu", "pannello"], panel_command))
+    application.add_handler(CommandHandler(["conteggio", "conteggi", "azzera"], tester_command))
     application.add_handler(CommandHandler("id", id_command))
     application.add_handler(CommandHandler("idgruppo", group_id_command))
     application.add_handler(CommandHandler("stato", status_command))

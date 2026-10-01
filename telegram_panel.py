@@ -115,17 +115,17 @@ class PanelSessions:
     def __init__(self):
         self.entries = {}
 
-    def remember(self, token, chat_id, message_id, actions):
+    def remember(self, token, chat_id, message_id, actions, payload=None):
         now = time.monotonic()
         self.entries = {t: r for t, r in self.entries.items()
                         if r['expires'] > now and (r['chat'], r['message']) != (chat_id, message_id)}
         while len(self.entries) >= 32:
             self.entries.pop(next(iter(self.entries)))
         self.entries[token] = dict(chat=chat_id, message=message_id,
-                                   actions=frozenset(actions), expires=now + 900)
+                                   actions=frozenset(actions), expires=now + 900, payload=payload)
 
     def take(self, data, chat_id, message_id):
-        if not isinstance(data, str) or not re.fullmatch(r'panel:[a-z_]+:[a-f0-9]{16}', data):
+        if not isinstance(data, str) or not re.fullmatch(r'panel:[a-z][a-z0-9_]*:[a-f0-9]{16}', data):
             return None
         _, action, token = data.split(':')
         record = self.entries.get(token)
@@ -137,9 +137,9 @@ class PanelSessions:
         return action
 
 
-def keyboard(paused, view='home'):
+def keyboard(paused, view='home', *, extra_rows=()):
     token = secrets.token_hex(8)
-    rows = []
+    rows = list(extra_rows)
     if view == 'closed':
         markup = InlineKeyboardMarkup([[InlineKeyboardButton('🌾 Apri pannello', callback_data=f'panel:open:{token}')]])
         return token, {'open'}, markup
@@ -151,7 +151,8 @@ def keyboard(paused, view='home'):
     rows.extend([
         [('📊 Stato', 'status'), ('▶️ Riprendi', 'resume') if paused else ('⏸ Pausa', 'pause')],
         [('🌐 Browser remoto', 'browser'), ('🩺 Controlli', 'controls')],
-        [('💾 Backup', 'backup'), ('🔄 Menu', 'home')],
+        [('💾 Backup', 'backup'), ('👥 Tester', 'testers')],
+        [('🔄 Menu', 'home')],
         [('✖️ Chiudi', 'close')],
     ])
     actions = {action for row in rows for _, action in row}

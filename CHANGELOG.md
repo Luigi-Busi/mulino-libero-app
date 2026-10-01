@@ -1,3 +1,11 @@
+## v1.3.0 — conteggi tester
+
+- Credito unico per richiesta dopo registrazione riuscita con verifica SMS riconosciuta, attribuito al tester finale.
+- Esito e credito salvati insieme nel registro SQLite; nessun credito retroattivo per esiti precedenti, recuperi manuali senza prova o registrazioni senza SMS.
+- /conteggio ID, /conteggi e /azzera ID riservati al proprietario nella chat privata e integrati nel pannello riutilizzabile.
+- Pulsante Tester con elenco paginato, dettaglio e azzeramento con doppio passaggio. Nuovi completamenti invalidano una conferma aperta.
+- Reset conservati nello storico; nessuna modifica o cancellazione degli esiti. Backup SQLite e rollback v1.2.1 compatibili; durante il rollback i nuovi completamenti non vengono conteggiati.
+
 # Modifiche di Mulino Libero
 
 ## v1.2.1 - 30 settembre 2026

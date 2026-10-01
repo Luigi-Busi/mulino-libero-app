@@ -80,3 +80,31 @@ Gli archivi delle versioni e i controller fanno parte della protezione esistente
 la directory di riepilogo è ricreabile e non contiene dati da recuperare.
 
 Riferimento callback: https://docs.python-telegram-bot.org/en/v22.8/telegram.callbackquery.html
+
+## Conteggi tester dalla v1.3.0
+
+Tester mostra gli ID della whitelist e dei tester nello storico, dieci per pagina.
+I numeri di telefono non sono esposti né copiati nel registro dei conteggi.
+/conteggi apre l'elenco, /conteggio ID apre il dettaglio, /azzera ID chiede
+conferma; tutti riusano lo stesso messaggio e sono riservati al proprietario
+nella propria chat privata. /id permette al tester di conoscere il proprio ID.
+
+Il credito richiede la pagina finale riconosciuta dopo l'OTP del tester corrente.
+Invio del numero/codice, codici errati, reinvii, caselle senza verifica telefonica
+e recuperi manuali senza prova SMS non assegnano crediti. Esito e credito sono
+salvati nella stessa transazione prima della chiusura del browser, senza attendere
+la sincronizzazione Google. La richiesta è univoca anche dopo un azzeramento.
+Non sono importate automaticamente le operazioni precedenti all'attivazione.
+
+Il reset registra un nuovo confine di conteggio, senza eliminare completamenti
+o modificare la coda. Conferma con scadenza di 15 minuti e uso singolo, vincolata
+al tester e al messaggio; un completamento nel frattempo richiede nuova conferma.
+Il dettaglio mostra periodo attuale e totale storico. Se la whitelist non è
+raggiungibile, l'elenco dichiara la limitazione e mostra solo i tester nello storico.
+
+Due tabelle aggiuntive nello stesso created-outcomes.sqlite3 conservano crediti
+(request ID, tester ID, date UTC) e reset (tester ID, confine, amministratore, data).
+Il backup locale e quello completo conservano tutto il file, senza nuove credenziali
+né servizi. Le colonne delle tabelle precedenti restano invariate. La v1.2.1 ignora
+le nuove tabelle e può verificare un backup nuovo; eventuali completamenti durante
+un rollback non vengono conteggiati automaticamente al ritorno alla v1.3.0.
