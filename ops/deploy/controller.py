@@ -18,6 +18,8 @@ import sys
 import tarfile
 import time
 import uuid
+
+from image_store import Store
 from dataclasses import dataclass
 
 
@@ -355,6 +357,12 @@ class Manager:
     def retain_image(self, record):
         self.run(['docker', 'image', 'inspect', record['image']])
         self.run(['docker', 'tag', record['image'], record['image_tag']])
+        if (self.c.state / 'releases' / 'shared-images.json').exists():
+            try:
+                Store(self.c.state, self.run, self.c.minimum_free).retain(record)
+            except (RuntimeError, OSError, ValueError) as error:
+                raise Failure('Conservazione condivisa non riuscita: ' + str(error)) from error
+            return
         images = self.c.state / 'images'
         images.mkdir(mode=0o700, exist_ok=True)
         archive = images / (record['image'].split(':')[1] + '.tar')
@@ -372,7 +380,12 @@ class Manager:
             self.run(['docker', 'image', 'inspect', record['image']])
         except Failure:
             archive = self.c.state / 'images' / (record['image'].split(':')[1] + '.tar')
-            self.run(['docker', 'image', 'load', '-i', archive], timeout=600)
+            if (self.c.state / 'releases' / 'shared-images.json').exists():
+                try:
+                    archive = Store(self.c.state, self.run, self.c.minimum_free).archive_for(record['image'])
+                except (RuntimeError, OSError, ValueError) as error:
+                    raise Failure('Archivio condiviso non disponibile: ' + str(error)) from error
+            self.run(['docker', 'image', 'load', '-i', archive], timeout=1200)
         self.run(['docker', 'image', 'inspect', record['image']])
         self.run(['docker', 'tag', record['image'], record['image_tag']])
 

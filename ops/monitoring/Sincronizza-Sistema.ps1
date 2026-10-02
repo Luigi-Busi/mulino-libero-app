@@ -52,6 +52,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Copie verificate, ma invio ricevuta non riuscito' }
     & ssh.exe -i $taskBackupKey -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=yes $taskTarget 'chmod 600 /home/backupmulino/mulino-monitor-receipt.json.download && mv -f /home/backupmulino/mulino-monitor-receipt.json.download /home/backupmulino/mulino-monitor-receipt.json'
     if ($LASTEXITCODE -ne 0) { throw 'Copie verificate, ma pubblicazione ricevuta non riuscita' }
+    & 'C:\Backup\Mulino-Libero\Sistema\Sincronizza-Archivi.ps1'
 } finally {
     if ($taskLocked) { $taskMutex.ReleaseMutex() }
     $taskMutex.Dispose()
