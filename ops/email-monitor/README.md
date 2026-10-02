@@ -4,7 +4,7 @@ Release indipendente del Mulino, versionata nello stesso repository sul ramo
 `ops/email-monitor`, con tag `email-monitor-vX.Y.Z`. Il tag `v1.3.0` continua
 a identificare l'applicazione Mugnaio. I due cicli di aggiornamento sono distinti.
 
-La prima release è `email-monitor-v1.0.0`, schema dati 1. Legge soltanto
+La release corrente è `email-monitor-v1.1.0`, schema dati 1. Legge soltanto
 Sisal Sport e PokerStars; Snai è disattivato nella configurazione privata.
 Usa i colori visualizzati delle celle email e password email: bianco, grigio,
 viola/fucsia ammessi; azzurro, rosso, rosso scuro e altri colori esclusi.
@@ -17,6 +17,27 @@ Il servizio usa IMAP in sola lettura, controlla anche lo spam e invia gli avvisi
 alla chat privata dell'amministratore tramite il Mugnaio. Non avvia il polling
 Telegram e non scrive nei fogli. Gli invii con esito incerto richiedono verifica
 amministrativa e non vengono ripetuti automaticamente.
+
+## Notifica della riattivazione
+
+Dopo la consegna confermata della richiesta documento viene aperta un'attesa
+per quella casella e quell'operatore. Dalle 08:00 del giorno successivo alla
+notifica, Europe/Rome, viene cercato anche l'oggetto "Il tuo account e' stato
+riattivato", dallo stesso mittente dell'operatore. Sono riconosciuti "è",
+apostrofi tipografici, maiuscole e spazi ripetuti. La ricerca include inbox e
+spam e le mail arrivate tra la richiesta documento e l'avvio del mattino.
+Il confronto usa la data interna IMAP, escludendo mail antecedenti alla richiesta.
+
+La notifica "Account riattivato" chiude l'attesa. Richieste documento ripetute
+durante la stessa attesa non spostano la data di avvio. Una nuova richiesta
+dopo la chiusura apre una nuova attesa. Se l'account viene escluso dai colori
+o dagli altri controlli di validità, l'attesa è annullata; il suo rientro non
+recupera mail del periodo di esclusione. Invii incerti richiedono verifica.
+
+Le tabelle aggiuntive conservano attese, cursori e notifiche separatamente dal
+registro originale: il rollback alla v1.0.0 conserva questi dati e sospende
+la funzione di riattivazione. Non vengono aperte attese retroattive per
+richieste documento già notificate prima dell'introduzione della funzione.
 
 ## Separazione di sorgenti e dati
 
@@ -108,7 +129,7 @@ evita il controllo a ritroso durante i normali aggiornamenti e rollback.
 
 ## Collaudo
 
-66 test: selezione dei fogli, colori, mittenti e oggetti, IMAP readonly,
+94 test: selezione dei fogli, colori, mittenti e oggetti, IMAP readonly,
 inizializzazione senza storico, limiti orari e cambio ora, riavvii,
 duplicati, consegna Telegram, backup/ripristino, aggiornamento,
 rollback e recupero da interruzione. Esecuzione in Linux, Python 3.12:

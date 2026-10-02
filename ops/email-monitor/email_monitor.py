@@ -5,7 +5,7 @@ import argparse
 import collections
 import contextlib
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from email import policy
 from email.parser import BytesHeaderParser
 from email.utils import getaddresses, parsedate_to_datetime
@@ -24,7 +24,7 @@ import time
 import unicodedata
 from zoneinfo import ZoneInfo
 
-VERSION = '1.0.0'
+VERSION = '1.1.0'
 RULES = {
  'sisal': ('info@sisal.it', "inviaci la copia del tuo documento d'identità"),
  'pokerstars': ('info@clienti.pokerstars.it', "inviaci il tuo documento d'identità"),
@@ -44,6 +44,17 @@ def within_hours(config, instant=None):
 def normalized(value):
  value = unicodedata.normalize('NFC', str(value)).casefold()
  return ' '.join(value.translate(str.maketrans({'’':"'",'‘':"'",'ʼ':"'",'`':"'"})).split())
+
+def received_time(value):
+ return datetime.strptime(value,'%d-%b-%Y %H:%M:%S %z').astimezone(timezone.utc)
+
+def next_morning(stamp):
+ local=datetime.fromisoformat(stamp).astimezone(ZoneInfo('Europe/Rome'))
+ return (local+timedelta(days=1)).replace(hour=8,minute=0,second=0,microsecond=0).astimezone(timezone.utc).isoformat()
+
+def is_reactivation(subject):
+ text=re.sub(r"\be\s*'",'è',normalized(subject))
+ return 'il tuo account è stato riattivato' in text
 
 def error_code(exc):
  # Never serialize exception messages: libraries may embed token URLs/passwords.
@@ -158,9 +169,13 @@ class State:
    CREATE TABLE IF NOT EXISTS events(event_key TEXT PRIMARY KEY,email TEXT NOT NULL,operator TEXT NOT NULL,subject TEXT NOT NULL,received TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'pending',attempts INTEGER NOT NULL DEFAULT 0,next_try REAL NOT NULL DEFAULT 0,telegram_message_id INTEGER,error TEXT,created TEXT NOT NULL,updated TEXT NOT NULL);
    CREATE TABLE IF NOT EXISTS runs(id INTEGER PRIMARY KEY,started TEXT NOT NULL,finished TEXT,summary TEXT);
    CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+   CREATE TABLE IF NOT EXISTS followups(request_key TEXT PRIMARY KEY,email TEXT NOT NULL,operator TEXT NOT NULL,request_received TEXT NOT NULL,not_before TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'waiting');
+   CREATE TABLE IF NOT EXISTS followup_cursors(request_key TEXT,folder TEXT,validity INTEGER NOT NULL,uid INTEGER NOT NULL,PRIMARY KEY(request_key,folder));
+   CREATE TABLE IF NOT EXISTS followup_events(event_key TEXT PRIMARY KEY,request_key TEXT NOT NULL,email TEXT NOT NULL,operator TEXT NOT NULL,subject TEXT NOT NULL,received TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'pending',attempts INTEGER NOT NULL DEFAULT 0,next_try REAL NOT NULL DEFAULT 0,telegram_message_id INTEGER,error TEXT,created TEXT NOT NULL,updated TEXT NOT NULL);
   ''')
   with self.db:
    self.db.execute("UPDATE events SET status='uncertain',error='PROCESS_INTERRUPTED',updated=? WHERE status='sending'",(now(),))
+   self.db.execute("UPDATE followup_events SET status='uncertain',error='PROCESS_INTERRUPTED',updated=? WHERE status='sending'",(now(),))
   os.chmod(path,0o600)
 
  def sync(self,accounts):
@@ -170,6 +185,9 @@ class State:
     active=int(key in desired);before=old.get(key); generation=(before['activation'] if before else 0)
     if active and (not before or not before['active']):generation+=1
     self.db.execute('INSERT OR REPLACE INTO subscriptions VALUES(?,?,?,?)',(*key,active,generation))
+    if not active:
+     self.db.execute("UPDATE followups SET status='cancelled' WHERE email=? AND operator=? AND status IN ('waiting','queued')",key)
+     self.db.execute("UPDATE followup_events SET status='cancelled',updated=? WHERE email=? AND operator=? AND status='pending'",(now(),*key))
 
  def generation(self,email,operator):
   return self.db.execute('SELECT activation FROM subscriptions WHERE email=? AND operator=? AND active=1',(email,operator)).fetchone()[0]
@@ -199,8 +217,36 @@ class State:
   return {'subscriptions':self.db.execute('SELECT COUNT(*) FROM subscriptions WHERE active=1').fetchone()[0],
    'initialized_folders':self.db.execute('SELECT COUNT(*) FROM cursors').fetchone()[0],
    'delivery':dict(self.db.execute('SELECT status,COUNT(*) FROM events GROUP BY status').fetchall()),
+   'reactivation_waits':dict(self.db.execute('SELECT status,COUNT(*) FROM followups GROUP BY status').fetchall()),
+   'reactivation_delivery':dict(self.db.execute('SELECT status,COUNT(*) FROM followup_events GROUP BY status').fetchall()),
    'last_run':dict(self.db.execute('SELECT * FROM runs ORDER BY id DESC LIMIT 1').fetchone() or {}),
    'integrity':self.db.execute('PRAGMA quick_check').fetchone()[0]}
+
+ def start_followup(self,event,stamp):
+  # Repeated document requests during the same open wait keep its first boundary.
+  if self.db.execute("SELECT 1 FROM followups WHERE email=? AND operator=? AND status IN ('waiting','queued')",(event['email'],event['operator'])).fetchone():return
+  self.db.execute('INSERT OR IGNORE INTO followups(request_key,email,operator,request_received,not_before) VALUES(?,?,?,?,?)',
+   (event['event_key'],event['email'],event['operator'],received_time(event['received']).isoformat(),next_morning(stamp)))
+
+ def due_followups(self,email,operators):
+  return [r for r in self.db.execute("SELECT f.* FROM followups f JOIN subscriptions s ON f.email=s.email AND f.operator=s.operator WHERE f.email=? AND f.status='waiting' AND s.active=1 AND f.not_before<=? ORDER BY f.not_before",(email,now())) if r['operator'] in operators]
+
+ def enqueue_followup(self,watch,raw,received):
+  message=BytesHeaderParser(policy=policy.default).parsebytes(raw)
+  addresses=getaddresses([str(h) for h in message.get_all('From',[])])
+  if len(addresses)!=1 or addresses[0][1].strip().casefold()!=RULES[watch['operator']][0]:return False
+  subject=str(message.get('Subject',''))
+  if not is_reactivation(subject) or received_time(received)<datetime.fromisoformat(watch['request_received']):return False
+  mid=str(message.get('Message-ID','')).strip()
+  fingerprint=mid if mid else hashlib.sha256(raw+received.encode()).hexdigest()
+  key=hashlib.sha256((watch['email']+'\n'+watch['operator']+'\n'+fingerprint).encode()).hexdigest()
+  stamp=now()
+  cur=self.db.execute('INSERT OR IGNORE INTO followup_events(event_key,request_key,email,operator,subject,received,created,updated) VALUES(?,?,?,?,?,?,?,?)',
+   (key,watch['request_key'],watch['email'],watch['operator'],subject[:1000],received,stamp,stamp))
+  if cur.rowcount:
+   self.db.execute("UPDATE followups SET status='queued' WHERE request_key=?",(watch['request_key'],))
+   return True
+  return False
 
 def parse_folders(lines):
  result=[]
@@ -228,9 +274,15 @@ class Scanner:
    conn.login(email,password)
    typ,lines=conn.list()
    if typ!='OK':raise RuntimeError('LIST failed')
-   for folder in parse_folders(lines):
+   folders=parse_folders(lines)
+   for folder in folders:
     try:self.scan_folder(conn,email,operators,folder,stats)
     except Exception as exc:errors.append({'folder':folder,'code':error_code(exc)})
+   for watch in self.state.due_followups(email,operators):
+    for folder in folders:
+     if self.state.db.execute('SELECT status FROM followups WHERE request_key=?',(watch['request_key'],)).fetchone()[0]!='waiting':break
+     try:self.scan_followup(conn,watch,folder,stats)
+     except Exception as exc:errors.append({'folder':folder,'code':error_code(exc),'phase':'reactivation'})
   if errors:return dict(stats),errors
   return dict(stats),[]
 
@@ -285,14 +337,54 @@ class Scanner:
   if len(uids)>cap:stats['backlog_folders']+=1
   stats['folders_checked']+=1
 
+ def scan_followup(self,conn,watch,folder,stats):
+  mailbox='"'+folder.replace('\\','\\\\').replace('"','\\"')+'"'
+  typ,_=conn.select(mailbox,readonly=True)
+  if typ!='OK':raise RuntimeError('SELECT failed')
+  def integer(name):
+   _,data=conn.response(name)
+   if not data or not isinstance(data[0],bytes) or not data[0].isdigit():raise ValueError('Missing UID metadata')
+   return int(data[0])
+  validity=integer('UIDVALIDITY');upper=integer('UIDNEXT')-1
+  if validity<=0 or upper<0:raise ValueError('Invalid UID metadata')
+  cursor=self.state.db.execute('SELECT * FROM followup_cursors WHERE request_key=? AND folder=?',(watch['request_key'],folder)).fetchone()
+  low=cursor['uid']+1 if cursor and cursor['validity']==validity else 1
+  if low>upper:return
+  # SINCE is day based. A one-day margin handles server INTERNALDATE offsets;
+  # the exact timestamp below rejects everything before the document request.
+  start=datetime.fromisoformat(watch['request_received'])-timedelta(days=1)
+  months=('Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec')
+  since=f'{start.day:02d}-{months[start.month-1]}-{start.year}'
+  typ,data=conn.uid('SEARCH',None,'SINCE',since,'UID',f'{low}:{upper}')
+  if typ!='OK' or not data or not isinstance(data[0],bytes):raise RuntimeError('SEARCH failed')
+  uids=sorted({int(x) for x in data[0].split() if x.isdigit() and low<=int(x)<=upper})
+  cap=self.config.get('max_messages_per_folder',500);batch=uids[:cap]
+  for uid in batch:
+   typ,data=conn.uid('FETCH',str(uid),'(UID INTERNALDATE BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE MESSAGE-ID)])')
+   if typ!='OK':raise RuntimeError('FETCH failed')
+   literals=[item for item in data if isinstance(item,tuple) and isinstance(item[1],bytes)]
+   if not literals:continue
+   if len(literals)!=1:raise ValueError('Unexpected FETCH response')
+   metadata,raw=literals[0];actual=re.search(rb'\bUID (\d+)\b',metadata);date=re.search(rb'INTERNALDATE "([^"\r\n]+)"',metadata)
+   if not actual or int(actual[1])!=uid or not date:raise ValueError('Invalid FETCH metadata')
+   with self.state.db:
+    found=self.state.enqueue_followup(watch,raw,date[1].decode('ascii'))
+    self.state.db.execute('INSERT OR REPLACE INTO followup_cursors VALUES(?,?,?,?)',(watch['request_key'],folder,validity,uid))
+   stats['reactivation_headers']+=1
+   if found:stats['reactivation_candidates']+=1;return
+  target=batch[-1] if len(uids)>cap else upper
+  with self.state.db:self.state.db.execute('INSERT OR REPLACE INTO followup_cursors VALUES(?,?,?,?)',(watch['request_key'],folder,validity,target))
+  if len(uids)>cap:stats['reactivation_backlog_folders']+=1
+
 def display_date(received):
  try:
   dt=datetime.strptime(received,'%d-%b-%Y %H:%M:%S %z')
   return dt.astimezone(ZoneInfo('Europe/Rome')).strftime('%d/%m/%Y, %H:%M')
  except ValueError:return received
 
-def notification(event,accounts):
- text=f"🚨 Richiesta documento — {LABELS[event['operator']]}\n"
+def notification(event,accounts,reactivation=False):
+ title='✅ Account riattivato' if reactivation else '🚨 Richiesta documento'
+ text=f"{title} — {LABELS[event['operator']]}\n"
  text+=f"Account: {accounts[0].name[:160]}\nEmail: {event['email']}\nOggetto: {event['subject'][:500]}\nRicevuta: {display_date(event['received'])}\n"
  text+='\n'.join(f'Apri {a.sheet}: {a.url}' for a in accounts[:4])
  return text[:3800]
@@ -313,20 +405,31 @@ class Telegram:
   if response.status_code in [400,401,403]:return ('failed',None,0,'TELEGRAM_REJECTED')
   return ('uncertain',None,0,'RESPONSE_UNCERTAIN')
 
-def deliver(state,accounts,sender):
+def deliver(state,accounts,sender,reactivation=False):
+ table='followup_events' if reactivation else 'events'
  index=collections.defaultdict(list)
  for account in accounts:index[(account.email,account.operator)].append(account)
  stats=collections.Counter()
- for event in state.db.execute("SELECT * FROM events WHERE status='pending' AND next_try<=? ORDER BY created LIMIT 100",(time.time(),)).fetchall():
+ for event in state.db.execute(f"SELECT * FROM {table} WHERE status='pending' AND next_try<=? ORDER BY created LIMIT 100",(time.time(),)).fetchall():
+  if reactivation:
+   watch=state.db.execute('SELECT * FROM followups WHERE request_key=?',(event['request_key'],)).fetchone()
+   if watch['not_before']>now():continue
   targets=index.get((event['email'],event['operator']))
   if not targets:
-   with state.db:state.db.execute("UPDATE events SET status='cancelled',updated=? WHERE event_key=?",(now(),event['event_key']))
+   with state.db:
+    state.db.execute(f"UPDATE {table} SET status='cancelled',updated=? WHERE event_key=?",(now(),event['event_key']))
+    if reactivation:state.db.execute("UPDATE followups SET status='cancelled' WHERE request_key=?",(event['request_key'],))
    stats['cancelled']+=1;continue
   # Claim before the network call. A process crash leaves an explicit uncertain
   # delivery, rather than silently repeating a Telegram notification.
-  with state.db:state.db.execute("UPDATE events SET status='sending',attempts=attempts+1,updated=? WHERE event_key=?",(now(),event['event_key']))
-  result,mid,delay,error=sender.send(notification(event,targets))
-  with state.db:state.db.execute('UPDATE events SET status=?,telegram_message_id=?,next_try=?,error=?,updated=? WHERE event_key=?',(result,mid,time.time()+delay,error,now(),event['event_key']))
+  with state.db:state.db.execute(f"UPDATE {table} SET status='sending',attempts=attempts+1,updated=? WHERE event_key=?",(now(),event['event_key']))
+  result,mid,delay,error=sender.send(notification(event,targets,reactivation))
+  stamp=now()
+  with state.db:
+   state.db.execute(f'UPDATE {table} SET status=?,telegram_message_id=?,next_try=?,error=?,updated=? WHERE event_key=?',(result,mid,time.time()+delay,error,stamp,event['event_key']))
+   if result=='sent':
+    if reactivation:state.db.execute("UPDATE followups SET status='sent' WHERE request_key=?",(event['request_key'],))
+    else:state.start_followup(event,stamp)
   stats[result]+=1
   if result=='pending':break
  return dict(stats)
@@ -371,11 +474,14 @@ def run_cycle(config,state,source=None,scanner=None,sender=None,sleep=time.sleep
    summary['first_attempt_errors']=len(summary['errors']);summary['errors']=retry_errors
   summary['checked_mailboxes']=len(successful);summary['scan']=dict(aggregate)
   # Re-read current account eligibility before delivering queued alerts.
-  if state.db.execute("SELECT 1 FROM events WHERE status='pending' LIMIT 1").fetchone():
+  if state.db.execute("SELECT 1 FROM events WHERE status='pending' UNION ALL SELECT 1 FROM followup_events WHERE status='pending' LIMIT 1").fetchone():
    latest,_=source.load();state.sync(latest)
    summary['delivery']=deliver(state,latest,sender or Telegram(config))
-  with state.db:state.db.execute("UPDATE events SET status='uncertain',error='PROCESS_INTERRUPTED',updated=? WHERE status='sending'",(now(),))
-  pending_problem=state.db.execute("SELECT COUNT(*) FROM events WHERE status IN ('uncertain','failed')").fetchone()[0]
+   summary['reactivation_delivery']=deliver(state,latest,sender or Telegram(config),True)
+  with state.db:
+   for table in ['events','followup_events']:state.db.execute(f"UPDATE {table} SET status='uncertain',error='PROCESS_INTERRUPTED',updated=? WHERE status='sending'",(now(),))
+  pending_problem=sum(state.db.execute(f"SELECT COUNT(*) FROM {table} WHERE status IN ('uncertain','failed')").fetchone()[0] for table in ['events','followup_events'])
+  summary['reactivation_waits']=dict(state.db.execute('SELECT status,COUNT(*) FROM followups GROUP BY status').fetchall())
   issues=sum(sum(v.get(key,0) for key in ['color_discordance','invalid_or_unsupported_email','missing_password','password_mismatch','missing_name']) for v in sheets.values())
   summary['configuration_issues']=issues;summary['delivery_issues']=pending_problem
   summary['status']='degraded' if summary['errors'] or issues or pending_problem else 'ok'

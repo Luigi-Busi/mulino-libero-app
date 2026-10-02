@@ -1,6 +1,6 @@
 import unittest,tempfile,json,sqlite3
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock,patch
 import email_monitor as m
 
 CONFIG={'allowed_colors':['#ffffff','#ff00ff','#9900ff'],'max_messages_per_folder':500,'imap_domains':['libero.it'],'max_rows':10000}
@@ -174,5 +174,158 @@ class SheetsSelectionTest(unittest.TestCase):
   accounts,report=self.load(password='');self.assertFalse(accounts);self.assertEqual(report['Sisal Sport']['missing_password'],1)
  def test_changed_sheet_id_fails_closed(self):
   with self.assertRaises(ValueError):self.load(gid=99)
+
+class FollowupTest(unittest.TestCase):
+ setUp=StateTest.setUp
+ tearDown=StateTest.tearDown
+ scan=StateTest.scan
+ event=StateTest.event
+ def sender(self,result='sent'):
+  sender=Mock();sender.send.return_value=(result,77,100 if result=='pending' else 0,None);return sender
+ def watch(self):
+  self.event()
+  with patch.object(m,'now',return_value='2026-10-02T19:00:00+00:00'):
+   m.deliver(self.state,[ACCOUNT],self.sender())
+  return self.state.db.execute('SELECT * FROM followups').fetchone()
+ def recovery(self,sender='info@sisal.it',subject="Il tuo account e' stato riattivato",mid='<reactivated>'):
+  return raw(sender=sender,subject=subject,mid=mid)
+ def enqueue(self,watch=None,received='02-Oct-2026 20:30:00 +0000',message=None):
+  with self.state.db:return self.state.enqueue_followup(watch or self.watch(),message or self.recovery(),received)
+ def test_wait_starts_only_after_confirmed_document_notification(self):
+  self.event();m.deliver(self.state,[ACCOUNT],self.sender('uncertain'))
+  self.assertEqual(self.state.db.execute('SELECT COUNT(*) FROM followups').fetchone()[0],0)
+ def test_rate_limited_document_has_no_wait_yet(self):
+  self.event();m.deliver(self.state,[ACCOUNT],self.sender('pending'))
+  self.assertEqual(self.state.db.execute('SELECT COUNT(*) FROM followups').fetchone()[0],0)
+ def test_start_is_next_morning_italian_time(self):
+  self.assertEqual(self.watch()['not_before'],'2026-10-03T06:00:00+00:00')
+ def test_daylight_saving_start(self):
+  self.assertEqual(m.next_morning('2026-03-28T20:00:00+00:00'),'2026-03-29T06:00:00+00:00')
+ def test_daylight_saving_end(self):
+  self.assertEqual(m.next_morning('2026-10-24T19:00:00+00:00'),'2026-10-25T07:00:00+00:00')
+ def test_notification_day_controls_start_even_if_request_older(self):
+  self.event()
+  with patch.object(m,'now',return_value='2026-10-05T07:00:00+00:00'):m.deliver(self.state,[ACCOUNT],self.sender())
+  self.assertEqual(self.state.db.execute('SELECT not_before FROM followups').fetchone()[0],'2026-10-06T06:00:00+00:00')
+ def test_no_extra_search_before_next_morning(self):
+  self.watch();conn=FakeIMAP(messages={5:self.recovery()})
+  with patch.object(m,'now',return_value='2026-10-03T05:59:59+00:00'):self.scan(conn)
+  self.assertFalse(any(c[0]=='SEARCH' for c in conn.calls))
+ def test_night_mail_found_at_eight_even_normal_cursor_already_passed(self):
+  self.watch();conn=FakeIMAP(messages={5:self.recovery()})
+  with patch.object(m,'now',return_value='2026-10-03T06:00:00+00:00'):
+   stats,errors=self.scan(conn);sender=self.sender();m.deliver(self.state,[ACCOUNT],sender,True)
+  self.assertFalse(errors);self.assertEqual(stats['reactivation_candidates'],1)
+  self.assertIn('Account riattivato',sender.send.call_args[0][0])
+  self.assertEqual(self.state.status()['reactivation_waits'],{'sent':1})
+  self.assertTrue(all(c[2] for c in conn.calls if c[0]=='SELECT'))
+  self.assertTrue(all('BODY.PEEK' in c[-1] for c in conn.calls if c[0]=='FETCH'))
+ def test_old_reactivation_rejected(self):
+  watch=self.watch();self.assertFalse(self.enqueue(watch,'02-Oct-2026 12:29:59 +0000'))
+ def test_wrong_sender_rejected(self):
+  watch=self.watch()
+  for sender in ['info@clienti.pokerstars.it','info@sisal.it.evil.example','info@sisal.it, evil@example.it']:
+   self.assertFalse(self.enqueue(watch,message=self.recovery(sender=sender)))
+ def test_subject_variants(self):
+  for subject in ["Il tuo account e' stato riattivato",'IL TUO ACCOUNT È STATO RIATTIVATO','Il tuo account e’ stato riattivato','Il tuo   account è stato riattivato']:
+   self.assertTrue(m.is_reactivation(subject))
+  self.assertFalse(m.is_reactivation('Il tuo account è stato sospeso'))
+ def test_pokerstars_uses_own_sender(self):
+  ps=m.Account('pokerstars',ACCOUNT.email,'Test','book','PokerStars',11,10,'id2');self.state.sync([ps])
+  self.event('pokerstars',raw(sender='info@clienti.pokerstars.it',subject="Inviaci il tuo documento d'identità"))
+  with patch.object(m,'now',return_value='2026-10-02T19:00:00+00:00'):m.deliver(self.state,[ps],self.sender())
+  watch=self.state.db.execute('SELECT * FROM followups').fetchone()
+  self.assertFalse(self.enqueue(watch))
+  self.assertTrue(self.enqueue(watch,message=self.recovery(sender='info@clienti.pokerstars.it')))
+ def test_pending_reactivation_never_delivered_early(self):
+  self.enqueue();sender=self.sender()
+  with patch.object(m,'now',return_value='2026-10-03T05:59:00+00:00'):m.deliver(self.state,[ACCOUNT],sender,True)
+  sender.send.assert_not_called()
+ def test_reactivation_dedup_across_folders_and_restart(self):
+  watch=self.watch();self.assertTrue(self.enqueue(watch));self.assertFalse(self.enqueue(watch))
+  self.state.db.close();self.state=m.State(Path(self.temp.name)/'state.sqlite3')
+  with patch.object(m,'now',return_value='2026-10-03T06:00:00+00:00'):
+   sender=self.sender();m.deliver(self.state,[ACCOUNT],sender,True);m.deliver(self.state,[ACCOUNT],sender,True)
+  sender.send.assert_called_once()
+ def test_reactivation_without_document_never_queued(self):
+  self.scan(FakeIMAP());conn=FakeIMAP(uidnext=7,messages={6:self.recovery()});self.scan(conn)
+  self.assertEqual(self.state.status()['reactivation_delivery'],{})
+ def test_failed_followup_fetch_retried_without_skip(self):
+  self.watch();conn=FakeIMAP(messages={5:self.recovery()},fail_uid=5,folders=[b'() "/" INBOX'])
+  with patch.object(m,'now',return_value='2026-10-03T06:00:00+00:00'):
+   _,errors=self.scan(conn);self.assertTrue(errors);conn.fail_uid=None
+   stats,errors=self.scan(conn);self.assertFalse(errors);self.assertEqual(stats['reactivation_candidates'],1)
+ def test_cancel_wait_if_account_excluded(self):
+  self.watch();self.state.sync([])
+  self.assertEqual(self.state.status()['reactivation_waits'],{'cancelled':1})
+  self.state.sync([ACCOUNT]);self.assertEqual(self.state.due_followups(ACCOUNT.email,{'sisal'}),[])
+ def test_eligibility_rechecked_before_followup_delivery(self):
+  self.enqueue();sender=self.sender()
+  with patch.object(m,'now',return_value='2026-10-03T06:00:00+00:00'):m.deliver(self.state,[],sender,True)
+  sender.send.assert_not_called();self.assertEqual(self.state.status()['reactivation_delivery'],{'cancelled':1})
+ def test_uncertain_followup_does_not_repeat(self):
+  self.enqueue();sender=self.sender('uncertain')
+  with patch.object(m,'now',return_value='2026-10-03T06:00:00+00:00'):
+   m.deliver(self.state,[ACCOUNT],sender,True);m.deliver(self.state,[ACCOUNT],sender,True)
+  sender.send.assert_called_once();self.assertEqual(self.state.status()['reactivation_waits'],{'queued':1})
+ def test_interrupted_followup_delivery_recovers_as_uncertain(self):
+  self.enqueue()
+  with self.state.db:self.state.db.execute("UPDATE followup_events SET status='sending'")
+  self.state.db.close();self.state=m.State(Path(self.temp.name)/'state.sqlite3')
+  self.assertEqual(self.state.status()['reactivation_delivery'],{'uncertain':1})
+ def test_repeated_document_keeps_original_open_wait(self):
+  watch=self.watch();self.event(message=raw(mid='<second-doc>'))
+  with patch.object(m,'now',return_value='2026-10-04T12:00:00+00:00'):m.deliver(self.state,[ACCOUNT],self.sender())
+  self.assertEqual(self.state.db.execute('SELECT COUNT(*) FROM followups').fetchone()[0],1)
+  self.assertEqual(self.state.db.execute('SELECT not_before FROM followups').fetchone()[0],watch['not_before'])
+ def test_new_document_after_completion_opens_new_wait(self):
+  self.enqueue()
+  with patch.object(m,'now',return_value='2026-10-03T06:00:00+00:00'):m.deliver(self.state,[ACCOUNT],self.sender(),True)
+  self.event(message=raw(mid='<second-doc>'))
+  with patch.object(m,'now',return_value='2026-10-04T12:00:00+00:00'):m.deliver(self.state,[ACCOUNT],self.sender())
+  self.assertEqual(self.state.status()['reactivation_waits'],{'sent':1,'waiting':1})
+ def test_snapshot_preserves_wait_and_followup_outbox(self):
+  from backup_system import snapshot
+  self.enqueue();snapshot(Path(self.temp.name)/'state.sqlite3',Path(self.temp.name)/'copy.sqlite3')
+  restored=m.State(Path(self.temp.name)/'copy.sqlite3')
+  try:
+   self.assertEqual(restored.status()['reactivation_waits'],{'queued':1})
+   self.assertEqual(restored.status()['reactivation_delivery'],{'pending':1})
+  finally:restored.db.close()
+ def test_old_schema_preserved_and_old_notifications_not_backfilled(self):
+  path=Path(self.temp.name)/'old.sqlite3';db=sqlite3.connect(path)
+  db.execute("CREATE TABLE events(event_key TEXT PRIMARY KEY,email TEXT NOT NULL,operator TEXT NOT NULL,subject TEXT NOT NULL,received TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'pending',attempts INTEGER NOT NULL DEFAULT 0,next_try REAL NOT NULL DEFAULT 0,telegram_message_id INTEGER,error TEXT,created TEXT NOT NULL,updated TEXT NOT NULL)")
+  db.execute("INSERT INTO events(event_key,email,operator,subject,received,status,created,updated) VALUES('old','test@libero.it','sisal','doc','date','sent','now','now')");db.commit();db.close()
+  upgraded=m.State(path)
+  try:
+   self.assertEqual(upgraded.status()['delivery'],{'sent':1})
+   self.assertEqual(upgraded.status()['reactivation_waits'],{})
+  finally:upgraded.db.close()
+ def test_followup_incremental_cursor_avoids_rescan(self):
+  self.watch();conn=FakeIMAP(messages={5:raw(subject='Altra mail')})
+  with patch.object(m,'now',return_value='2026-10-03T06:00:00+00:00'):
+   self.scan(conn);conn.calls.clear();self.scan(conn)
+  self.assertFalse(any(c[0] in ['FETCH','SEARCH'] for c in conn.calls))
+ def test_followup_uidvalidity_change_recovers_only_since_request(self):
+  self.watch();conn=FakeIMAP(messages={5:raw(subject='Altra mail')})
+  with patch.object(m,'now',return_value='2026-10-03T06:00:00+00:00'):
+   self.scan(conn);conn.validity=2;conn.messages={5:self.recovery()};stats,errors=self.scan(conn)
+  self.assertFalse(errors);self.assertEqual(stats['reactivation_candidates'],1)
+ def test_followup_batch_limit_keeps_pending_search_progress(self):
+  self.watch();conn=FakeIMAP(uidnext=8,messages={5:raw(subject='Other'),6:raw(subject='Other'),7:self.recovery()},folders=[b'() "/" INBOX'])
+  scanner=m.Scanner({**CONFIG,'max_messages_per_folder':1},self.state,lambda:conn)
+  with patch.object(m,'now',return_value='2026-10-03T06:00:00+00:00'):
+   first,_=scanner.scan(ACCOUNT.email,{'sisal'},'pw');self.assertEqual(first['reactivation_backlog_folders'],1)
+   scanner.scan(ACCOUNT.email,{'sisal'},'pw');last,errors=scanner.scan(ACCOUNT.email,{'sisal'},'pw')
+  self.assertFalse(errors);self.assertEqual(last['reactivation_candidates'],1)
+ def test_full_cycle_rechecks_sheets_and_delivers_reactivation(self):
+  self.watch();pw=Path(self.temp.name)/'pw';pw.write_text('test-password')
+  cfg={**CONFIG,'password_file':str(pw),'status_file':str(Path(self.temp.name)/'status.json')}
+  source=Mock();source.load.return_value=([ACCOUNT],{'Sisal Sport':{'eligible':1}})
+  conn=FakeIMAP(messages={5:self.recovery()});scanner=m.Scanner(cfg,self.state,lambda:conn);sender=self.sender()
+  with patch.object(m,'now',return_value='2026-10-03T06:00:00+00:00'):
+   summary=m.run_cycle(cfg,self.state,source=source,scanner=scanner,sender=sender,sleep=lambda _:None)
+  self.assertEqual(summary['status'],'ok');self.assertEqual(summary['reactivation_delivery'],{'sent':1})
+  self.assertEqual(source.load.call_count,2);sender.send.assert_called_once()
 
 if __name__=='__main__':unittest.main(verbosity=2)
