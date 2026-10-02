@@ -20,14 +20,31 @@ New-Item -ItemType Directory -Path $OutputDirectory | Out-Null
 $taskSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 & icacls.exe $OutputDirectory /inheritance:r /grant:r "*${taskSid}:(OI)(CI)F" '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' | Out-Null
 if ($LASTEXITCODE -ne 0) { throw 'Protezione cartella fallita' }
-$taskKeyring = Join-Path $OutputDirectory 'keyring'
+$taskKeyRoot = Split-Path -Parent ([System.IO.Path]::GetFullPath($PrivateKey))
+$taskKeyring = Join-Path $taskKeyRoot ('tmp-archivi-' + [guid]::NewGuid().ToString('N').Substring(0,12))
 New-Item -ItemType Directory -Path $taskKeyring | Out-Null
-& $taskGpg --homedir (Convert-HistoryMsysPath $taskKeyring) --batch --import (Convert-HistoryMsysPath $PrivateKey) 2> (Join-Path $OutputDirectory 'import.log')
-if ($LASTEXITCODE -ne 0) { throw 'Importazione della chiave di recupero fallita' }
-$taskPartial = Join-Path $OutputDirectory 'images.tar.gz.partial'
-& $taskGpg --homedir (Convert-HistoryMsysPath $taskKeyring) --batch --output (Convert-HistoryMsysPath $taskPartial) --decrypt (Convert-HistoryMsysPath $taskSource) 2> (Join-Path $OutputDirectory 'decrypt.log')
-if ($LASTEXITCODE -ne 0) { throw 'Decifratura fallita: non usare il file parziale' }
-if ((Get-FileHash -LiteralPath $taskPartial -Algorithm SHA256).Hash.ToLowerInvariant() -ne $taskIndex.sha256 -or (Get-Item -LiteralPath $taskPartial).Length -ne $taskIndex.bytes) { throw 'Archivio decifrato diverso dall originale' }
-Move-Item -LiteralPath $taskPartial -Destination (Join-Path $OutputDirectory $taskIndex.archive)
+& icacls.exe $taskKeyring /inheritance:r /grant:r "*${taskSid}:(OI)(CI)F" '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' | Out-Null
+if ($LASTEXITCODE -ne 0) { throw 'Protezione del keyring temporaneo fallita' }
+try {
+    & $taskGpg --homedir (Convert-HistoryMsysPath $taskKeyring) --batch --import (Convert-HistoryMsysPath $PrivateKey) 2> (Join-Path $OutputDirectory 'import.log')
+    if ($LASTEXITCODE -ne 0) { throw 'Importazione della chiave di recupero fallita' }
+    $taskPartial = Join-Path $OutputDirectory 'images.tar.gz.partial'
+    & $taskGpg --homedir (Convert-HistoryMsysPath $taskKeyring) --batch --output (Convert-HistoryMsysPath $taskPartial) --decrypt (Convert-HistoryMsysPath $taskSource) 2> (Join-Path $OutputDirectory 'decrypt.log')
+    if ($LASTEXITCODE -ne 0) { throw 'Decifratura fallita: non usare il file parziale' }
+    if ((Get-FileHash -LiteralPath $taskPartial -Algorithm SHA256).Hash.ToLowerInvariant() -ne $taskIndex.sha256 -or (Get-Item -LiteralPath $taskPartial).Length -ne $taskIndex.bytes) { throw 'Archivio decifrato diverso dall originale' }
+    Move-Item -LiteralPath $taskPartial -Destination (Join-Path $OutputDirectory $taskIndex.archive)
+} finally {
+    # The recovery key stays separate from the backup archives. Delete only the
+    # disposable keyring created beside the existing recovery key. Its short
+    # path also keeps the GnuPG agent's Unix socket below its length limit.
+    $taskGpgConf = 'C:\Program Files\Git\usr\bin\gpgconf.exe'
+    if (Test-Path -LiteralPath $taskGpgConf) {
+        & $taskGpgConf --homedir (Convert-HistoryMsysPath $taskKeyring) --kill gpg-agent 2> (Join-Path $OutputDirectory 'agent.log')
+    }
+    $taskResolvedKeyRoot = (Resolve-Path -LiteralPath $taskKeyRoot).Path
+    $taskResolvedKeyring = (Resolve-Path -LiteralPath $taskKeyring).Path
+    if ((Split-Path -Parent $taskResolvedKeyring) -ne $taskResolvedKeyRoot -or (Split-Path -Leaf $taskResolvedKeyring) -notmatch '^tmp-archivi-[a-f0-9]{12}$') { throw 'Percorso del keyring temporaneo inatteso' }
+    Remove-Item -LiteralPath $taskResolvedKeyring -Recurse -Force
+}
 $taskIndex | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $OutputDirectory 'shared-images.json') -Encoding UTF8
 Write-Output ('Archivio decifrato e verificato: ' + @($taskIndex.images).Count + ' immagini. Nessun servizio avviato.')
