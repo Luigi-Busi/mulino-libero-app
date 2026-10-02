@@ -1,3 +1,11 @@
+## v1.3.1 — menu in fondo alla chat e pulizia dei comandi
+
+- /menu invia un nuovo pannello, salva il riferimento e solo dopo rimuove il precedente; i pulsanti continuano a modificare il pannello corrente.
+- Rimozione dei nuovi comandi gestiti del proprietario solo nella sua chat privata, dopo completamento del relativo handler. Nessuna scansione della cronologia.
+- Cancellazioni pendenti conservate con soli ID, retry dopo errori transitori e protezione del pannello corrente dopo riavvio o ripristino.
+- Invio fallito conserva pannello e comando precedenti; salvataggio fallito conserva il vecchio pannello. Gruppi, tester, testo normale, SMS/CAPTCHA e avvisi non sono inclusi.
+- /pannello e /start mantengono il riuso del messaggio. Registro tester e backup restano compatibili con v1.3.0.
+
 ## v1.3.0 — conteggi tester
 
 - Credito unico per richiesta dopo registrazione riuscita con verifica SMS riconosciuta, attribuito al tester finale.

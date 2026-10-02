@@ -108,3 +108,37 @@ Il backup locale e quello completo conservano tutto il file, senza nuove credenz
 né servizi. Le colonne delle tabelle precedenti restano invariate. La v1.2.1 ignora
 le nuove tabelle e può verificare un backup nuovo; eventuali completamenti durante
 un rollback non vengono conteggiati automaticamente al ritorno alla v1.3.0.
+
+## Menu in fondo e comandi puliti dalla v1.3.1
+
+/menu invia un nuovo pannello in fondo alla chat. Solo dopo l'invio riuscito e
+il salvataggio del nuovo riferimento, il vecchio pannello viene accodato per
+la cancellazione. I suoi pulsanti vengono invalidati. I pulsanti del nuovo
+pannello continuano ad aggiornare lo stesso messaggio. /pannello e /start
+mantengono invece il riuso del messaggio esistente.
+
+Dopo il buon esito del relativo gestore sono eliminati i nuovi comandi registrati
+(start, menu, pannello, conteggio, conteggi, azzera, id, idgruppo, stato, recupera,
+controlla, backup, pausa, browser, riprendi, annulla, riprova, conferma_creata)
+solo se il messaggio osservato proviene dal proprietario nella sua chat privata.
+Non vengono cancellate le risposte del bot ai comandi diretti, gli avvisi,
+i messaggi ordinari, i dati per la registrazione o i comandi dei tester/gruppi.
+Non viene letta la cronologia e non sono ricostruiti ID di messaggi sconosciuti.
+
+La nuova tabella admin_chat_cleanup nello stesso database degli esiti conserva
+solo proprietario, bot, messaggio e tipo. Riferimento nuovo e cancellazione del
+pannello precedente sono salvati insieme. Gli errori di rete conservano il job;
+la pulizia riparte anche dopo riavvio. Il pannello corrente è sempre protetto,
+compreso dopo un ripristino. Un errore nella pulizia non ripete un comando già
+eseguito. Il salvataggio del riferimento fallito lascia il vecchio pannello.
+
+Telegram consente le cancellazioni entro 48 ore: se il pannello precedente
+è troppo vecchio o non eliminabile resta visibile ma inattivo, senza bloccare
+il nuovo. Errori definitivi non sono ritentati senza fine; altri errori e limiti
+di frequenza conservano il job e rispettano l'attesa. Un invio del nuovo
+pannello fallito non elimina quello precedente né il comando /menu.
+
+La v1.3.0 ignora la tabella aggiuntiva e verifica i backup SQLite nuovi; non
+esegue questa pulizia. Backup, conteggi tester, coda, versioni e configurazione
+non cambiano. Nessun nuovo permesso o servizio esterno.
+Riferimento: https://core.telegram.org/bots/api#deletemessage

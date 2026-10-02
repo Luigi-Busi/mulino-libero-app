@@ -45,7 +45,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         coordinator.paused = True
         coordinator.sync_pending_outcomes = AsyncMock()
         coordinator.messages.drain = AsyncMock()
-        coordinator.application = SimpleNamespace(bot=object(), bot_data={})
+        coordinator.application = SimpleNamespace(bot=SimpleNamespace(id=7), bot_data={})
         task = asyncio.create_task(coordinator.loop())
         coordinator.application.bot_data['queue_task'] = task
         try:

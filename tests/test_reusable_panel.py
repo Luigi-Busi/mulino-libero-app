@@ -18,7 +18,7 @@ class ReuseTests(unittest.IsolatedAsyncioTestCase):
     callback = fixtures.PanelTests.callback
     opened = fixtures.PanelTests.opened
 
-    async def test_repeated_menu_edits_one_message(self):
+    async def test_repeated_pannello_edits_one_message(self):
         c,u,ctx,m = await self.opened()
         for _ in range(3):
             await worker.panel_command(u,ctx)
@@ -27,7 +27,7 @@ class ReuseTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(call.kwargs['message_id']==42 for call in c.bot.edit_message_text.call_args_list))
         m.reply_text.assert_not_awaited()
 
-    async def test_menu_reuses_persisted_message_after_restart(self):
+    async def test_pannello_reuses_persisted_message_after_restart(self):
         c,u,ctx,m = await self.opened()
         c.panel = ReusablePanel(c.outcomes.db,99)
         c.panel_sessions = worker.PanelSessions()

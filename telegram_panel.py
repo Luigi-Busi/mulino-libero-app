@@ -1,6 +1,9 @@
 """Private panel helpers; no network, shell, credentials or registration actions."""
 from datetime import datetime, timezone
 import asyncio
+from contextlib import suppress
+import logging
+from telegram.error import BadRequest, Forbidden, RetryAfter, TelegramError
 import json
 from pathlib import Path
 import re
@@ -9,6 +12,9 @@ import sqlite3
 import time
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+
+LOGGER = logging.getLogger('mulino-admin-cleanup')
 
 
 COMPONENTS = {
@@ -66,10 +72,77 @@ def controls_text(path=Path('/run/mulino-panel/status.json'), now=None):
         return '⚠️ Riepilogo dei controlli non disponibile o non valido. Non posso confermare lo stato dei servizi. Gli avvisi Healthchecks restano separati.'
 
 
+class AdminChatCleanup:
+    """Only explicitly observed owner commands and retired panel IDs; no history scan."""
+    def __init__(self, db, owner):
+        self.db, self.owner = db, owner
+        db.execute("""CREATE TABLE IF NOT EXISTS admin_chat_cleanup (
+            owner INTEGER NOT NULL, bot INTEGER NOT NULL, message INTEGER NOT NULL,
+            kind TEXT NOT NULL CHECK(kind IN ('panel','command')),
+            PRIMARY KEY(owner,bot,message))""")
+        self.lock = asyncio.Lock()
+        self.retry_at = 0.0
+
+    @staticmethod
+    def valid_id(value):
+        return type(value) is int and 0 < value < 2**63
+
+    def enqueue(self, bot, message, kind):
+        if (not all(self.valid_id(v) for v in (self.owner, bot, message))
+                or kind not in ('panel', 'command')):
+            raise ValueError('Invalid cleanup target')
+        self.db.execute('INSERT OR IGNORE INTO admin_chat_cleanup VALUES (?,?,?,?)',
+                        (self.owner, bot, message, kind))
+
+    async def drain(self, bot, current_message):
+        async with self.lock:
+            if time.monotonic() < self.retry_at:
+                return
+            try:
+                rows = self.db.execute('SELECT message FROM admin_chat_cleanup WHERE owner=? AND bot=? ORDER BY message LIMIT 8',
+                                       (self.owner, bot.id)).fetchall()
+                for (message,) in rows:
+                    current = current_message() if callable(current_message) else current_message
+                    if not self.valid_id(message) or message == current:
+                        # A restored pointer can make an old deletion job current again.
+                        self.db.execute('DELETE FROM admin_chat_cleanup WHERE owner=? AND bot=? AND message=?',
+                                        (self.owner, bot.id, message))
+                        continue
+                    try:
+                        deleted = await bot.delete_message(chat_id=self.owner, message_id=message,
+                            read_timeout=3, write_timeout=3, connect_timeout=3)
+                        if deleted is not True:
+                            raise RuntimeError('Deletion unconfirmed')
+                    except RetryAfter as exc:
+                        delay = exc.retry_after
+                        seconds = delay.total_seconds() if hasattr(delay, 'total_seconds') else float(delay)
+                        self.retry_at = time.monotonic() + seconds + 1
+                        return
+                    except Forbidden:
+                        LOGGER.warning('Pulizia amministrativa non consentita da Telegram')
+                    except BadRequest as exc:
+                        if not any(reason in str(exc).lower() for reason in (
+                                'message to delete not found', "message can't be deleted", 'message_id_invalid')):
+                            self.retry_at = time.monotonic() + 60
+                            LOGGER.warning('Pulizia amministrativa rinviata per risposta Telegram inattesa')
+                            return
+                        LOGGER.warning('Messaggio amministrativo assente o non eliminabile')
+                    except (TelegramError, RuntimeError):
+                        self.retry_at = time.monotonic() + 10
+                        LOGGER.warning('Pulizia amministrativa rinviata per connessione non disponibile')
+                        return
+                    self.db.execute('DELETE FROM admin_chat_cleanup WHERE owner=? AND bot=? AND message=?',
+                                    (self.owner, bot.id, message))
+            except sqlite3.Error:
+                self.retry_at = time.monotonic() + 10
+                LOGGER.warning('Registro della pulizia amministrativa non disponibile')
+
+
 class ReusablePanel:
     """Only numeric message ownership persists; views and jobs remain in memory."""
     def __init__(self, db, owner):
         self.db, self.owner = db, owner
+        self.cleanup = AdminChatCleanup(db, owner)
         self.pointer = None
         self.persistence_error = False
         self.lock = asyncio.Lock()
@@ -89,15 +162,25 @@ class ReusablePanel:
     def message_id(self, bot):
         return self.pointer['message'] if self.pointer and self.pointer['bot'] == bot else None
 
-    def bind(self, bot, message):
+    def bind(self, bot, message, *, retired_message=None):
         if not all(type(v) is int and 0 < v < 2**63 for v in (self.owner, bot, message)):
             raise ValueError('Invalid panel ownership')
         self.pointer = dict(owner=self.owner, bot=bot, message=message)
+        transaction = False
         try:
+            self.db.execute('SAVEPOINT panel_replacement')
+            transaction = True
             self.db.execute("INSERT INTO runtime_settings(key,value) VALUES ('admin_panel',?) "
                             "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (json.dumps(self.pointer),))
+            if retired_message is not None and retired_message != message:
+                self.cleanup.enqueue(bot, retired_message, 'panel')
+            self.db.execute('RELEASE panel_replacement')
             self.persistence_error = False
         except sqlite3.Error:
+            if transaction:
+                with suppress(sqlite3.Error):
+                    self.db.execute('ROLLBACK TO panel_replacement')
+                    self.db.execute('RELEASE panel_replacement')
             self.persistence_error = True
 
 

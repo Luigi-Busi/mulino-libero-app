@@ -2569,6 +2569,7 @@ class Coordinator:
                         )
                 await asyncio.sleep(self.settings.poll_seconds)
                 await self.messages.drain(self.bot)
+                await self.panel.cleanup.drain(self.bot, lambda: self.panel.message_id(self.bot.id))
                 self.last_queue_ok = time.monotonic()
             except asyncio.CancelledError:
                 raise
@@ -3210,14 +3211,14 @@ def panel_status_text(coordinator: Coordinator) -> str:
     else:
         lines.append('Nessuna registrazione attiva.')
     lines.append(f'Caselle create in attesa di scrittura su Sheets: {coordinator.outcomes.pending_count()}.')
-    lines.append('Premi Stato per aggiornare, Chiudi per ridurre il pannello. /menu riapre lo stesso messaggio. Se un pulsante scade, premi Menu oppure usa /menu.')
+    lines.append('Premi Stato per aggiornare, Chiudi per ridurre il pannello. /menu porta un nuovo pannello in fondo alla chat e rimuove il precedente quando possibile.')
     return '\n'.join(lines)
 
 
 async def render_admin_panel(coordinator: Coordinator, message: Any, *, text: Optional[str] = None,
                              view: str = 'home', edit: bool = False,
                              expected_revision: Optional[int] = None, extra_rows=(),
-                             session_payload=None) -> Optional[int]:
+                             session_payload=None, force_new: bool = False) -> Optional[int]:
     panel = coordinator.panel
     async with panel.lock:
         if expected_revision is not None and panel.revision != expected_revision:
@@ -3228,7 +3229,7 @@ async def render_admin_panel(coordinator: Coordinator, message: Any, *, text: Op
             text += '\n⚠️ Non riesco a salvare il riferimento del pannello: dopo un riavvio potrebbe essere ricreato.'
         message_id = panel.message_id(coordinator.bot.id)
         sent = None
-        if message_id:
+        if message_id and not force_new:
             try:
                 sent = await coordinator.bot.edit_message_text(chat_id=coordinator.settings.admin_id,
                     message_id=message_id, text=text, reply_markup=markup, disable_web_page_preview=True)
@@ -3241,7 +3242,11 @@ async def render_admin_panel(coordinator: Coordinator, message: Any, *, text: Op
             sent = await coordinator.bot.send_message(chat_id=coordinator.settings.admin_id,
                 text=text, reply_markup=markup, disable_web_page_preview=True)
         if (panel.message_id(coordinator.bot.id) != sent.message_id or panel.persistence_error):
-            panel.bind(coordinator.bot.id, sent.message_id)
+            panel.bind(coordinator.bot.id, sent.message_id,
+                       retired_message=message_id if force_new else None)
+        if force_new and message_id and message_id != sent.message_id:
+            coordinator.panel_sessions.entries = {k:v for k,v in coordinator.panel_sessions.entries.items()
+                if (v['chat'],v['message']) != (coordinator.settings.admin_id,message_id)}
         panel.revision += 1
         panel.view = view
         coordinator.panel_sessions.remember(token, sent.chat.id, sent.message_id, actions, payload=session_payload)
@@ -3271,6 +3276,39 @@ async def start_panel_backup(coordinator: Coordinator, *, status_only: bool) -> 
     coordinator.backup_task = asyncio.create_task(run_backup_command(coordinator, None, status_only, panel_revision=revision))
 
 
+ADMIN_CLEAN_COMMANDS = frozenset(('start','menu','pannello','conteggio','conteggi','azzera',
+    'id','idgruppo','stato','recupera','controlla','backup','pausa','browser','riprendi',
+    'annulla','riprova','conferma_creata'))
+
+
+def admin_command(callback):
+    """Clean only an observed owner command AFTER its registered handler succeeds."""
+    async def wrapped(update, context):
+        coordinator = context.application.bot_data['coordinator']
+        user, chat, message = update.effective_user, update.effective_chat, update.effective_message
+        words = (getattr(message, 'text', '') or '').split()
+        command = words[0].split('@')[0].lower() if words else ''
+        eligible = bool(user and chat and message
+            and user.id == coordinator.settings.admin_id
+            and chat.type == ChatType.PRIVATE and chat.id == coordinator.settings.admin_id
+            and getattr(message, 'chat', None) and message.chat.id == chat.id
+            and getattr(message, 'from_user', None) and message.from_user.id == user.id
+            and not getattr(message, 'forward_origin', None)
+            and not getattr(message, 'is_automatic_forward', False)
+            and command.startswith('/') and command[1:] in ADMIN_CLEAN_COMMANDS
+            and type(message.message_id) is int and 0 < message.message_id < 2**63)
+        target = message.message_id if eligible else None
+        await callback(update, context)
+        if target is not None:
+            try:
+                coordinator.panel.cleanup.enqueue(coordinator.bot.id, target, 'command')
+            except (sqlite3.Error, ValueError):
+                LOGGER.warning('Comando gestito; registrazione della pulizia non disponibile')
+            await coordinator.panel.cleanup.drain(coordinator.bot,
+                                                 lambda: coordinator.panel.message_id(coordinator.bot.id))
+    return wrapped
+
+
 async def panel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     coordinator: Coordinator = context.application.bot_data['coordinator']
     if (not update.effective_user or not update.effective_chat or not update.effective_message
@@ -3278,7 +3316,9 @@ async def panel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             or update.effective_chat.type != ChatType.PRIVATE
             or update.effective_chat.id != coordinator.settings.admin_id):
         return
-    await render_admin_panel(coordinator, update.effective_message)
+    words = (getattr(update.effective_message, 'text', '') or '').split()
+    force_new = bool(words and words[0].split('@')[0].lower() == '/menu')
+    await render_admin_panel(coordinator, update.effective_message, force_new=force_new)
 
 
 async def panel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -4125,6 +4165,7 @@ async def post_init(application: Application) -> None:
         LOGGER.warning("Google Sheets non raggiungibile all'avvio; recupero rinviato")
     coordinator.messages.recover()
     await coordinator.messages.drain(application.bot)
+    await coordinator.panel.cleanup.drain(application.bot, lambda: coordinator.panel.message_id(application.bot.id))
     if recovered:
         await application.bot.send_message(
             chat_id=coordinator.settings.admin_id,
@@ -4246,21 +4287,21 @@ def main() -> None:
     )
     application.bot_data["coordinator"] = coordinator
     application.add_error_handler(error_handler)
-    application.add_handler(CommandHandler("start", start_command))
-    application.add_handler(CommandHandler(["menu", "pannello"], panel_command))
-    application.add_handler(CommandHandler(["conteggio", "conteggi", "azzera"], tester_command))
-    application.add_handler(CommandHandler("id", id_command))
-    application.add_handler(CommandHandler("idgruppo", group_id_command))
-    application.add_handler(CommandHandler("stato", status_command))
-    application.add_handler(CommandHandler("recupera", recovery_command))
-    application.add_handler(CommandHandler("controlla", consistency_command))
-    application.add_handler(CommandHandler("backup", backup_command))
-    application.add_handler(CommandHandler("pausa", pause_command))
-    application.add_handler(CommandHandler("browser", browser_command))
-    application.add_handler(CommandHandler("riprendi", resume_command))
-    application.add_handler(CommandHandler("annulla", cancel_command))
-    application.add_handler(CommandHandler("riprova", retry_command))
-    application.add_handler(CommandHandler("conferma_creata", confirm_created_command))
+    application.add_handler(CommandHandler("start", admin_command(start_command)))
+    application.add_handler(CommandHandler(["menu", "pannello"], admin_command(panel_command)))
+    application.add_handler(CommandHandler(["conteggio", "conteggi", "azzera"], admin_command(tester_command)))
+    application.add_handler(CommandHandler("id", admin_command(id_command)))
+    application.add_handler(CommandHandler("idgruppo", admin_command(group_id_command)))
+    application.add_handler(CommandHandler("stato", admin_command(status_command)))
+    application.add_handler(CommandHandler("recupera", admin_command(recovery_command)))
+    application.add_handler(CommandHandler("controlla", admin_command(consistency_command)))
+    application.add_handler(CommandHandler("backup", admin_command(backup_command)))
+    application.add_handler(CommandHandler("pausa", admin_command(pause_command)))
+    application.add_handler(CommandHandler("browser", admin_command(browser_command)))
+    application.add_handler(CommandHandler("riprendi", admin_command(resume_command)))
+    application.add_handler(CommandHandler("annulla", admin_command(cancel_command)))
+    application.add_handler(CommandHandler("riprova", admin_command(retry_command)))
+    application.add_handler(CommandHandler("conferma_creata", admin_command(confirm_created_command)))
     application.add_handler(CallbackQueryHandler(callback_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
     application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)

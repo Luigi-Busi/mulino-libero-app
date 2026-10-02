@@ -15,12 +15,13 @@ from telegram_panel import COMPONENTS, PanelSessions, ReusablePanel, controls_te
 class PanelTests(unittest.IsolatedAsyncioTestCase):
     def setup_panel(self, user=99, chat=99, kind='private'):
         message = SimpleNamespace(chat=SimpleNamespace(id=chat, type=kind), message_id=42, is_accessible=True, from_user=SimpleNamespace(id=7))
+        message.text = '/pannello'
         message.reply_text = AsyncMock(return_value=message)
         message.edit_text = AsyncMock(return_value=message)
         db=sqlite3.connect(':memory:', isolation_level=None)
         db.execute('CREATE TABLE runtime_settings (key TEXT PRIMARY KEY,value TEXT NOT NULL)')
         self.addCleanup(db.close)
-        bot=SimpleNamespace(id=7,send_message=AsyncMock(return_value=message),edit_message_text=AsyncMock(return_value=message))
+        bot=SimpleNamespace(id=7,delete_message=AsyncMock(return_value=True),send_message=AsyncMock(return_value=message),edit_message_text=AsyncMock(return_value=message))
         coordinator = SimpleNamespace(bot=bot,panel=ReusablePanel(db,99),settings=SimpleNamespace(admin_id=99, remote_browser_url='https://example.test/view'),
                                       paused=False, active=None, registration_busy=Mock(return_value=False),
                                       outcomes=SimpleNamespace(db=db,pending_count=Mock(return_value=0)),
