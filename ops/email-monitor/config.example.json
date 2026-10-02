@@ -1,0 +1,21 @@
+{
+  "google_credentials": "/credentials.json",
+  "password_file": "/libero-password",
+  "telegram_token_file": "/telegram-token",
+  "telegram_chat_id": "ID_AMMINISTRATORE",
+  "db_file": "/state/monitor.sqlite3",
+  "status_file": "/state/status.json",
+  "imap_host": "imapmail.libero.it",
+  "imap_domains": ["libero.it", "inwind.it", "iol.it", "blu.it", "giallo.it"],
+  "allowed_colors": ["#ffffff", "#ff00ff", "#9900ff", "#d9d2e9", "#b4a7d6", "#8e7cc3", "#674ea7", "#351c75", "#20124d"],
+  "operating_hours": [8, 22],
+  "delay_min": 2,
+  "delay_max": 4,
+  "retry_seconds": 120,
+  "max_messages_per_folder": 500,
+  "max_rows": 10000,
+  "sources": [
+    {"book":"ID_FILE_PRINCIPALE","sheet":"Sisal Sport","gid":"ID_SCHEDA_SISAL","operator":"sisal"},
+    {"book":"ID_FILE_PRINCIPALE","sheet":"PokerStars","gid":"ID_SCHEDA_POKERSTARS","operator":"pokerstars"}
+  ]
+}

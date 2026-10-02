@@ -1,0 +1,16 @@
+[Unit]
+Description=Mulino - richieste documento via email
+After=docker.service network-online.target
+Requires=docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/mulino-email-monitor once
+ExecStopPost=/usr/local/sbin/mulino-email-monitor cleanup
+TimeoutStartSec=50min
+KillMode=control-group
+UMask=0077
+StandardOutput=journal
+StandardError=journal
+

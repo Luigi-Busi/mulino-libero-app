@@ -52,6 +52,7 @@ def restore(core, images, confirmed):
     permitted = ['opt/mulino-libero/', 'var/lib/mulino-deploy/',
                  'usr/local/lib/mulino-deploy/', 'usr/local/lib/mulino-recovery/',
                  'usr/local/lib/mulino-monitor/', 'etc/mulino-monitor/',
+                 'usr/local/lib/mulino-email-monitor/', 'etc/mulino-email-monitor/',
                  'usr/local/sbin/mulino-', 'etc/systemd/system/mulino-',
                  'etc/systemd/system/bot-risponditore.service',
                  'etc/mulino-recovery/', 'root/.ssh/', 'home/backupmulino/.ssh/']
@@ -133,12 +134,25 @@ def restore(core, images, confirmed):
         target = image_dir / (r['image'].split(':')[1] + '.tar')
         if target != shared:
             os.link(shared, target)
+    email_runtime = Path('/etc/mulino-email-monitor/runtime.json')
+    if email_runtime.exists():
+        email_image = json.loads(email_runtime.read_text())['image']
+        if not re.fullmatch('sha256:[a-f0-9]{64}', email_image):
+            raise ValueError('Invalid restored monitor image')
+        if json.loads(run(['docker', 'image', 'inspect', email_image]))[0]['Id'] != email_image:
+            raise ValueError('Wrong restored monitor image')
+        monitor_db = data / 'email-monitor/monitor.sqlite3'
+        if monitor_db.exists():
+            with sqlite3.connect(monitor_db) as monitor_connection:
+                assert monitor_connection.execute('PRAGMA integrity_check').fetchall() == [('ok',)]
     # No Telegram polling, startup messages, or cleanup jobs before cutover.
     run(['systemctl', 'daemon-reload'])
     for unit in ['bot-risponditore.service', 'mulino-backup-export.timer', 'mulino-system-backup.timer']:
         run(['systemctl', 'disable', unit])
     if Path('/etc/systemd/system/mulino-monitor.timer').exists():
         run(['systemctl', 'disable', 'mulino-monitor.timer'])
+    if Path('/etc/systemd/system/mulino-email-monitor.timer').exists():
+        run(['systemctl', 'disable', 'mulino-email-monitor.timer'])
     (Path('/var/lib/mulino-restore') / 'SERVICES-NOT-ACTIVATED').write_text(
         'Start only after the original server is off and the Sheets queue is reconciled.\n')
     result.update(restored_outcomes=count, queue_paused=True, services_started=False,

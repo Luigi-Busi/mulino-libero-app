@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Public-key encrypted, online snapshots. Never writes live data or secrets."""
 import fcntl
+from contextlib import closing
 import hashlib
 import json
 import os
@@ -91,8 +92,8 @@ def copy_tree(source, stage):
 
 def snapshot(source, target):
     target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    with sqlite3.connect(source.as_uri() + '?mode=ro', uri=True, timeout=30) as src:
-        with sqlite3.connect(target) as dst:
+    with closing(sqlite3.connect(source.as_uri() + '?mode=ro', uri=True, timeout=30)) as src:
+        with closing(sqlite3.connect(target)) as dst:
             src.backup(dst, pages=128, sleep=0.1)
             if dst.execute('PRAGMA integrity_check').fetchall() != [('ok',)]:
                 raise ValueError('SQLite integrity check failed')
@@ -115,10 +116,32 @@ def backup():
         head = run(['git', '-C', APP, 'rev-parse', 'HEAD']).decode().strip()
         if head != state['current']['sha'] or run(['git', '-C', APP, 'status', '--porcelain']).strip():
             raise RuntimeError('Application checkout does not match stable release')
+        email_release_file = Path('/etc/mulino-email-monitor/release.json')
+        if email_release_file.exists():
+            if Path('/etc/mulino-email-monitor/release-pending.json').exists():
+                raise RuntimeError('Email monitor update pending; recover before backup')
+            email_release = json.loads(email_release_file.read_text())['current']
+            if not re.fullmatch('email-monitor-v[0-9]+\\.[0-9]+\\.[0-9]+', email_release['tag']) or not re.fullmatch('[a-f0-9]{40}', email_release['commit']):
+                raise ValueError('Invalid monitor release identity')
+            if run(['git', '-C', APP, 'rev-parse', email_release['tag'] + '^{commit}']).decode().strip() != email_release['commit']:
+                raise ValueError('Monitor tag differs from recorded commit')
+            for installed, record in email_release['managed_files'].items():
+                if not installed.startswith(('/usr/local/lib/mulino-email-monitor/', '/usr/local/lib/mulino-recovery/')) and installed not in ['/usr/local/sbin/mulino-email-monitor', '/etc/systemd/system/mulino-email-monitor.service', '/etc/systemd/system/mulino-email-monitor.timer']:
+                    raise ValueError('Unexpected managed monitor path')
+                tracked = run(['git', '-C', APP, 'show', email_release['commit'] + ':' + record['git_path']])
+                if digest(installed) != record['sha256'] or hashlib.sha256(tracked).hexdigest() != record['sha256']:
+                    raise ValueError('Monitor source differs from its Git release')
         records = [state['current']]
         if state.get('previous'):
             records.append(state['previous'])
         image_ids = sorted(set(r['image'] for r in records))
+        email_runtime = Path('/etc/mulino-email-monitor/runtime.json')
+        if email_runtime.exists():
+            email_image = json.loads(email_runtime.read_text())['image']
+            if not re.fullmatch('sha256:[a-f0-9]{64}', email_image):
+                raise ValueError('Invalid email monitor runtime')
+            run(['docker', 'image', 'inspect', email_image])
+            image_ids = sorted(set(image_ids + [email_image]))
         image_key = hashlib.sha256('\n'.join(image_ids).encode()).hexdigest()
         asset = OUT / ('images-' + image_key + '.tar.gpg')
         metadata = asset.with_suffix(asset.suffix + '.json')
@@ -177,6 +200,21 @@ def backup():
             run(['git', '-C', APP, 'bundle', 'verify', stage / 'repository.bundle'])
             for name in ['created-outcomes.sqlite3', 'telegram-cleanup.sqlite3']:
                 snapshot(APP.parent / 'data' / name, stage / 'rootfs/opt/mulino-libero/data' / name)
+            # The email monitor has its own online SQLite snapshot and pinned
+            # image. Never copy a live WAL database as an ordinary file.
+            if Path('/etc/mulino-email-monitor/runtime.json').exists():
+                copy_tree('/usr/local/lib/mulino-email-monitor', stage)
+                copy_tree('/etc/mulino-email-monitor', stage)
+                for monitor_file in ['/usr/local/sbin/mulino-email-monitor',
+                        '/etc/systemd/system/mulino-email-monitor.service',
+                        '/etc/systemd/system/mulino-email-monitor.timer']:
+                    copy_file(monitor_file, stage)
+                monitor_data = APP.parent / 'data/email-monitor'
+                monitor_db = monitor_data / 'monitor.sqlite3'
+                if monitor_db.exists():
+                    snapshot(monitor_db, stage / 'rootfs/opt/mulino-libero/data/email-monitor/monitor.sqlite3')
+                if (monitor_data / 'status.json').exists():
+                    copy_file(monitor_data / 'status.json', stage)
             # Package exact Risponditore dependencies for reinstall without PyPI.
             python = APP / '.venv-risponditore/bin/python'
             pinned = run([python, '-m', 'pip', 'freeze', '--all']).decode()

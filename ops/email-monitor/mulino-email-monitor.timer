@@ -1,0 +1,11 @@
+[Unit]
+Description=Controllo email documenti dalle 08:00 alle 21:00 (ora italiana)
+
+[Timer]
+OnCalendar=*-*-* 08..21:00:00 Europe/Rome
+AccuracySec=30s
+Persistent=false
+Unit=mulino-email-monitor.service
+
+[Install]
+WantedBy=timers.target
