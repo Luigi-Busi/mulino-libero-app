@@ -5,7 +5,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 
-IMAGE = 'sha256:1c044051680bb324123661f3d65d09035ec1beb6e8b5e2df5322003b7aa01ba9'
+IMAGE = 'sha256:ac98ba8cbc18e857af0340ab492bcb755b28efa804ef2dfab1b88cfcf91d5b4e'
 
 
 def main():
@@ -27,10 +27,10 @@ def main():
         if result.returncode:
             raise RuntimeError('Synthetic integration failed: ' + result.stderr)
 
-    execute("""import asyncio
+    execute("""import asyncio,time
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock,patch
 from telegram.error import TimedOut
 from libero_mail_bot import CreatedOutcomes,MessageCleanup,QueueRequest
 from telegram_panel import ReusablePanel
@@ -39,6 +39,8 @@ r=QueueRequest(2,'fixture','IN_CREAZIONE','s','t',4,3,'',claimed_by='11')
 o.save(r,'fixture','fixture@libero.it',sms_proof=(11,o.testers.now()))
 p=ReusablePanel(o.db,99);p.bind(7,42);p.bind(7,44,retired_message=42)
 p.cleanup.enqueue(7,50,'command')
+t=int(time.time());Path('/fixture/clock.txt').write_text(str(t))
+p.cleanup.track_response(7,80,t);p.cleanup.track_response(7,81,t)
 bot=SimpleNamespace(id=7,delete_message=AsyncMock(side_effect=TimedOut()))
 asyncio.run(p.cleanup.drain(bot,p.message_id(7)))
 assert o.db.execute('SELECT COUNT(*) FROM admin_chat_cleanup').fetchone()[0]==2
@@ -47,18 +49,22 @@ o.close()
     execute("""import asyncio
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock,patch
 from libero_mail_bot import CreatedOutcomes
 from telegram_panel import ReusablePanel
 o=CreatedOutcomes(Path('/fixture'));p=ReusablePanel(o.db,99)
 assert p.message_id(7)==44 and o.queue_paused() and o.testers.stats(11)['count']==1
 bot=SimpleNamespace(id=7,delete_message=AsyncMock(return_value=True))
-asyncio.run(p.cleanup.drain(bot,p.message_id(7)))
-assert [c.kwargs['message_id'] for c in bot.delete_message.call_args_list]==[42,50]
+t=int(Path('/fixture/clock.txt').read_text())
+with patch('telegram_panel.time.time',return_value=t+86400):
+ asyncio.run(p.cleanup.drain(bot,p.message_id(7)))
+assert [c.kwargs['message_id'] for c in bot.delete_message.call_args_list]==[42,50,80]
+assert o.db.execute('SELECT message FROM admin_response_history').fetchall()==[(81,)]
+p.cleanup.track_response(7,44,t);p.cleanup.track_response(7,79,t)
 assert o.db.execute('SELECT COUNT(*) FROM admin_chat_cleanup').fetchone()[0]==0
 p.cleanup.enqueue(7,44,'panel');o.close()
 """)
-    scenarios = ['pending deletions survive restart and only known retired panel/command IDs are removed']
+    scenarios = ['restart preserves response ages; scheduled day-old replies, retired panel and command removed; latest response preserved']
     execute("""from pathlib import Path
 from libero_mail_bot import CreatedOutcomes,LocalBackups
 from telegram_panel import ReusablePanel
@@ -66,16 +72,17 @@ o=CreatedOutcomes(Path('/fixture'))
 assert o.queue_paused() and o.testers.stats(11)['count']==1
 assert ReusablePanel(o.db,99).message_id(7)==44
 assert o.db.execute('SELECT COUNT(*) FROM admin_chat_cleanup').fetchone()[0]==1
+assert o.db.execute('SELECT COUNT(*) FROM admin_response_history').fetchone()[0]==3
 o.close()
 b=LocalBackups(Path('/fixture')).create('manual')
 assert b['retention_ok']
 LocalBackups.verify(Path('/fixture/backups')/b['filename'])
 """, new=False)
-    scenarios.append('real v1.3.0 image preserves pending jobs, tester counts and creates/verifies ZIP')
+    scenarios.append('real v1.3.1 image preserves response history, pending jobs, tester counts and creates/verifies ZIP')
     execute("""import asyncio
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock,patch
 from zipfile import ZipFile
 from libero_mail_bot import CreatedOutcomes,LocalBackups
 from telegram_panel import ReusablePanel
@@ -86,13 +93,16 @@ with ZipFile(archive) as z:
   (restored/name).write_bytes(z.read(name))
 o=CreatedOutcomes(restored);p=ReusablePanel(o.db,99)
 bot=SimpleNamespace(id=7,delete_message=AsyncMock(return_value=True))
-asyncio.run(p.cleanup.drain(bot,p.message_id(7)))
-bot.delete_message.assert_not_awaited()
+t=int((root/'clock.txt').read_text())
+with patch('telegram_panel.time.time',return_value=t+86400):
+ asyncio.run(p.cleanup.drain(bot,p.message_id(7)))
+assert [c.kwargs['message_id'] for c in bot.delete_message.call_args_list]==[79]
+assert o.db.execute('SELECT message FROM admin_response_history').fetchall()==[(81,)]
 assert p.message_id(7)==44 and o.queue_paused() and o.testers.stats(11)['count']==1
 assert o.db.execute('SELECT COUNT(*) FROM admin_chat_cleanup').fetchone()[0]==0
 o.close()
 """)
-    scenarios.append('actual ZIP restore protects current panel from obsolete job and preserves pause/tester counts')
+    scenarios.append('actual ZIP restore resumes aged-response cleanup while protecting latest response/current panel and preserving pause/tester counts')
     execute("""from pathlib import Path
 from libero_mail_bot import LocalBackups
 b=LocalBackups(Path('/fixture')).create('manual');assert b['retention_ok']

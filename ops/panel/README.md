@@ -142,3 +142,30 @@ La v1.3.0 ignora la tabella aggiuntiva e verifica i backup SQLite nuovi; non
 esegue questa pulizia. Backup, conteggi tester, coda, versioni e configurazione
 non cambiano. Nessun nuovo permesso o servizio esterno.
 Riferimento: https://core.telegram.org/bots/api#deletemessage
+
+## Risposte ordinarie della coda dalla v1.3.2
+
+Solo le risposte nuove, realmente inviate al proprietario nella sua chat privata,
+di /pausa, /stato e /riprendi sono registrate in admin_response_history. Un'unica
+categoria queue conserva owner, bot, message e sent_at (secondi UTC dalla data
+Telegram), senza testo, argomenti, credenziali o identificativi delle richieste.
+La risposta con ID Telegram maggiore resta sempre. Le precedenti vengono
+eliminate quando hanno almeno 24 ore e meno di 48 ore; oltre il limite Telegram
+è eliminato soltanto il riferimento obsoleto, non un messaggio della cronologia.
+
+Il ciclo esistente della coda esegue la pulizia anche mentre è in pausa e senza
+nuovi comandi. Otto risposte per passaggio; nessun nuovo servizio o timer.
+Errori transitori e limiti di frequenza conservano i riferimenti per ritentare.
+Un salvataggio fallito dopo invio non ripete il comando né l'azione sulla coda.
+Duplicati e registrazione fuori ordine non cambiano data o risposta più recente.
+Il pannello corrente è protetto anche dopo ripristino.
+
+Le risposte con registrazione attiva/in chiusura, errori di pausa/ripresa,
+pausa non persistente o esiti pendenti verso Sheets restano escluse. Il pannello
+non è una risposta eliminabile. Restano esclusi altri comandi, risposte a tester,
+gruppi, inoltri, testo ordinario e avvisi. Nessuna ricostruzione della cronologia
+precedente all'attivazione; i suoi messaggi non sono cancellati.
+
+La tabella aggiuntiva è conservata da tutti i backup del registro e ignorata
+dalla v1.3.1 in rollback. Conteggi, pausa e struttura delle altre tabelle non
+cambiano. Il browser e il suo collegamento restano quelli già configurati.

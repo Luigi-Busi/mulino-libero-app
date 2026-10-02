@@ -80,6 +80,11 @@ class AdminChatCleanup:
             owner INTEGER NOT NULL, bot INTEGER NOT NULL, message INTEGER NOT NULL,
             kind TEXT NOT NULL CHECK(kind IN ('panel','command')),
             PRIMARY KEY(owner,bot,message))""")
+        db.execute("""CREATE TABLE IF NOT EXISTS admin_response_history (
+            owner INTEGER NOT NULL, bot INTEGER NOT NULL, message INTEGER NOT NULL,
+            category TEXT NOT NULL CHECK(category='queue'),
+            sent_at INTEGER NOT NULL CHECK(sent_at>0),
+            PRIMARY KEY(owner,bot,message))""")
         self.lock = asyncio.Lock()
         self.retry_at = 0.0
 
@@ -93,6 +98,41 @@ class AdminChatCleanup:
             raise ValueError('Invalid cleanup target')
         self.db.execute('INSERT OR IGNORE INTO admin_chat_cleanup VALUES (?,?,?,?)',
                         (self.owner, bot, message, kind))
+
+    def track_response(self, bot, message, sent_at):
+        """Record only a successfully delivered routine queue response, never its text."""
+        if (not all(self.valid_id(v) for v in (self.owner, bot, message))
+                or type(sent_at) is not int or not 0 < sent_at <= time.time() + 60):
+            raise ValueError('Invalid response metadata')
+        self.db.execute('INSERT OR IGNORE INTO admin_response_history VALUES (?,?,?,?,?)',
+                        (self.owner, bot, message, 'queue', sent_at))
+
+    async def delete_known(self, bot, message):
+        """True means removed or permanently unavailable; False keeps the durable job."""
+        try:
+            deleted = await bot.delete_message(chat_id=self.owner, message_id=message,
+                read_timeout=3, write_timeout=3, connect_timeout=3)
+            if deleted is not True:
+                raise RuntimeError('Deletion unconfirmed')
+        except RetryAfter as exc:
+            delay = exc.retry_after
+            seconds = delay.total_seconds() if hasattr(delay, 'total_seconds') else float(delay)
+            self.retry_at = time.monotonic() + seconds + 1
+            return False
+        except Forbidden:
+            LOGGER.warning('Pulizia amministrativa non consentita da Telegram')
+        except BadRequest as exc:
+            if not any(reason in str(exc).lower() for reason in (
+                    'message to delete not found', "message can't be deleted", 'message_id_invalid')):
+                self.retry_at = time.monotonic() + 60
+                LOGGER.warning('Pulizia amministrativa rinviata per risposta Telegram inattesa')
+                return False
+            LOGGER.warning('Messaggio amministrativo assente o non eliminabile')
+        except (TelegramError, RuntimeError):
+            self.retry_at = time.monotonic() + 10
+            LOGGER.warning('Pulizia amministrativa rinviata per connessione non disponibile')
+            return False
+        return True
 
     async def drain(self, bot, current_message):
         async with self.lock:
@@ -108,31 +148,33 @@ class AdminChatCleanup:
                         self.db.execute('DELETE FROM admin_chat_cleanup WHERE owner=? AND bot=? AND message=?',
                                         (self.owner, bot.id, message))
                         continue
-                    try:
-                        deleted = await bot.delete_message(chat_id=self.owner, message_id=message,
-                            read_timeout=3, write_timeout=3, connect_timeout=3)
-                        if deleted is not True:
-                            raise RuntimeError('Deletion unconfirmed')
-                    except RetryAfter as exc:
-                        delay = exc.retry_after
-                        seconds = delay.total_seconds() if hasattr(delay, 'total_seconds') else float(delay)
-                        self.retry_at = time.monotonic() + seconds + 1
-                        return
-                    except Forbidden:
-                        LOGGER.warning('Pulizia amministrativa non consentita da Telegram')
-                    except BadRequest as exc:
-                        if not any(reason in str(exc).lower() for reason in (
-                                'message to delete not found', "message can't be deleted", 'message_id_invalid')):
-                            self.retry_at = time.monotonic() + 60
-                            LOGGER.warning('Pulizia amministrativa rinviata per risposta Telegram inattesa')
-                            return
-                        LOGGER.warning('Messaggio amministrativo assente o non eliminabile')
-                    except (TelegramError, RuntimeError):
-                        self.retry_at = time.monotonic() + 10
-                        LOGGER.warning('Pulizia amministrativa rinviata per connessione non disponibile')
+                    if not await self.delete_known(bot, message):
                         return
                     self.db.execute('DELETE FROM admin_chat_cleanup WHERE owner=? AND bot=? AND message=?',
                                     (self.owner, bot.id, message))
+                # No command is needed: the existing coordinator loop calls drain while paused too.
+                # Telegram IDs are increasing within this private chat, including concurrent sends.
+                now = int(time.time())
+                rows = self.db.execute('''SELECT message,sent_at FROM admin_response_history
+                    WHERE owner=? AND bot=? AND category='queue' AND sent_at<=?
+                    AND message < (SELECT MAX(message) FROM admin_response_history
+                        WHERE owner=? AND bot=? AND category='queue')
+                    ORDER BY sent_at,message LIMIT 8''',
+                    (self.owner,bot.id,now-86400,self.owner,bot.id)).fetchall()
+                for message, sent_at in rows:
+                    current = current_message() if callable(current_message) else current_message
+                    latest = self.db.execute('''SELECT MAX(message) FROM admin_response_history
+                        WHERE owner=? AND bot=? AND category='queue' ''',(self.owner,bot.id)).fetchone()[0]
+                    if message == latest:
+                        continue
+                    if (self.valid_id(message) and message != current
+                            and now - 172800 < sent_at <= now - 86400):
+                        if not await self.delete_known(bot, message):
+                            return
+                    # Expired metadata cannot be used to delete Telegram history older than 48h.
+                    # A restored current-panel pointer is protected even if it was tracked wrongly.
+                    self.db.execute('DELETE FROM admin_response_history WHERE owner=? AND bot=? AND message=?',
+                                    (self.owner,bot.id,message))
             except sqlite3.Error:
                 self.retry_at = time.monotonic() + 10
                 LOGGER.warning('Registro della pulizia amministrativa non disponibile')

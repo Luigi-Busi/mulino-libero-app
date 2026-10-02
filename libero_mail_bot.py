@@ -3829,6 +3829,34 @@ async def consistency_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     coordinator.consistency_task = asyncio.create_task(run_consistency_check(coordinator, update.effective_message))
 
 
+async def reply_queue_summary(coordinator: Coordinator, update: Update, text: str, *, routine: bool) -> None:
+    """Track only explicit routine command replies delivered to the owner's private chat."""
+    message = update.effective_message
+    sent = await message.reply_text(text)
+    if not routine:
+        return
+    user, chat = update.effective_user, update.effective_chat
+    words = (getattr(message, 'text', '') or '').split()
+    command = words[0].split('@')[0].lower() if words else ''
+    date = getattr(sent, 'date', None)
+    if not (user and chat and sent and user.id == coordinator.settings.admin_id
+            and chat.type == ChatType.PRIVATE and chat.id == user.id
+            and getattr(message, 'chat', None) and message.chat.id == chat.id
+            and getattr(message, 'from_user', None) and message.from_user.id == user.id
+            and not getattr(message, 'forward_origin', None)
+            and not getattr(message, 'is_automatic_forward', False)
+            and command in ('/pausa', '/stato', '/riprendi')
+            and getattr(sent, 'chat', None) and sent.chat.id == chat.id and sent.chat.type == ChatType.PRIVATE
+            and getattr(sent, 'from_user', None) and sent.from_user.id == coordinator.bot.id
+            and isinstance(date, datetime) and date.tzinfo is not None):
+        return
+    try:
+        coordinator.panel.cleanup.track_response(coordinator.bot.id, getattr(sent, 'message_id', None), int(date.timestamp()))
+    except (sqlite3.Error, ValueError, OverflowError):
+        # Delivery and any queue-state change already succeeded; never repeat the command.
+        LOGGER.warning('Risposta inviata; registrazione della pulizia non disponibile')
+
+
 async def pause_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     coordinator: Coordinator = context.application.bot_data["coordinator"]
     if (not update.effective_user or not update.effective_chat
@@ -3841,13 +3869,14 @@ async def pause_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.effective_message.reply_text(f"⚠️ {exc}")
         return
     text = "⏸ Pausa salvata. Non avviero nuove registrazioni.\n"
-    if coordinator.registration_busy():
+    busy = coordinator.registration_busy()
+    if busy:
         text += ("La richiesta gia avviata continua, inclusi CAPTCHA e SMS. "
                  "Attendi la sua conclusione prima di aggiornare. "
                  "Se e bloccata puoi usare /annulla, poi verificare /stato.")
     else:
         text += "Nessuna registrazione attiva: puoi aggiornare. La pausa restera attiva dopo il riavvio."
-    await update.effective_message.reply_text(text + "\nPer riattivare la coda: /riprendi.")
+    await reply_queue_summary(coordinator, update, text + "\nPer riattivare la coda: /riprendi.", routine=not busy)
 
 
 async def resume_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3861,9 +3890,9 @@ async def resume_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     except RegistrationError as exc:
         await update.effective_message.reply_text(f"⚠️ {exc}")
         return
-    await update.effective_message.reply_text(
+    await reply_queue_summary(coordinator, update,
         "▶️ Coda attiva. Le richieste in attesa potranno partire dal prossimo controllo. "
-        "Quelle fallite o annullate restano gestibili con /recupera.")
+        "Quelle fallite o annullate restano gestibili con /recupera.", routine=not coordinator.registration_busy())
 
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3873,11 +3902,13 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     request = coordinator.active
     if not request:
         count = coordinator.outcomes.pending_count()
-        await update.effective_message.reply_text(
+        busy = coordinator.registration_busy()
+        await reply_queue_summary(coordinator, update,
             coordinator.queue_status_text() + "\n"
             + ("Richiesta in avvio o chiusura: attendi prima di aggiornare.\n"
-               if coordinator.registration_busy() else "Nessuna registrazione attiva.\n")
-            + f"Caselle create in attesa di scrittura su Sheets: {count}."
+               if busy else "Nessuna registrazione attiva.\n")
+            + f"Caselle create in attesa di scrittura su Sheets: {count}.",
+            routine=not busy and count == 0 and getattr(coordinator, 'pause_persisted', True)
         )
         return
     await coordinator.cleanup_messages(request, "status")

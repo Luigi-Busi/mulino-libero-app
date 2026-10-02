@@ -1,3 +1,11 @@
+## v1.3.2 — pulizia delle risposte ordinarie sullo stato della coda
+
+- Le risposte ordinarie di /pausa, /stato e /riprendi condividono una categoria: l'ultima resta sempre, le precedenti sono eliminate dopo 24 ore e prima del limite Telegram di 48 ore.
+- Pulizia periodica anche senza nuovi comandi e mentre la coda è in pausa; data di invio Telegram e soli identificativi conservati nello stesso database protetto.
+- Errori, avvisi di operazioni attive o salvataggi pendenti, pannello, altri comandi, gruppi e tester esclusi. Nessuna lettura o pulizia retroattiva della cronologia.
+- Riavvio e ripristino conservano età e ultima risposta; errori di rete non ripetono il comando. La v1.3.1 legge e verifica i nuovi backup ignorando la tabella aggiuntiva.
+- Collegamento e apertura del browser restano invariati.
+
 ## v1.3.1 — menu in fondo alla chat e pulizia dei comandi
 
 - /menu invia un nuovo pannello, salva il riferimento e solo dopo rimuove il precedente; i pulsanti continuano a modificare il pannello corrente.
