@@ -4545,7 +4545,7 @@ function numeroColonnaLettera(
 }
 
 // Il Banco: private account dashboard. No credentials in logs/cache/callback_data.
-const BANCO_MENU_VERSION = '1.0.0';
+const BANCO_MENU_VERSION = '1.0.1';
 const BANCO_STATUS_TAB = 'Stato Account Banco';
 const BANCO_PAGE_SIZE = 8;
 const BANCO_COLORS = ['#ffffff','#ff00ff','#9900ff','#d9d2e9','#b4a7d6','#8e7cc3','#674ea7','#351c75','#20124d'];
@@ -4676,7 +4676,7 @@ function bancoHelp_() {
 
 function bancoBooks_() {
   const props=PropertiesService.getScriptProperties();
-  return ['SPREADSHEET_ID','SPREADSHEET_ID_SUPPLYER'].map((key,index)=>({key:key,index:index,id:props.getProperty(key)})).filter(b=>!!b.id);
+  return ['SPREADSHEET_ID'].map((key,index)=>({key:key,index:index,id:props.getProperty(key)})).filter(b=>!!b.id);
 }
 function bancoSheets_() {
   const result=[];
@@ -4684,7 +4684,7 @@ function bancoSheets_() {
     const book=SpreadsheetApp.openById(b.id);
     book.getSheets().forEach(sheet=>{
       const cfg=Object.keys(CONFIG_SITI).map(k=>CONFIG_SITI[k]).find(c=>c.spreadsheetProperty===b.key && c.foglio===sheet.getName());
-      if (cfg) result.push({book:b.id,bookIndex:b.index,bookTitle:book.getName(),sheet:sheet,gid:sheet.getSheetId(),name:sheet.getName()});
+      if (cfg && ['Sisal Sport','PokerStars'].indexOf(sheet.getName())!==-1) result.push({book:b.id,bookIndex:b.index,bookTitle:book.getName(),sheet:sheet,gid:sheet.getSheetId(),name:sheet.getName()});
     });
   });
   return result;

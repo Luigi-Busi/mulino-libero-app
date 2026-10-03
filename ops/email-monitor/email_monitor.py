@@ -24,7 +24,7 @@ import time
 import unicodedata
 from zoneinfo import ZoneInfo
 
-VERSION = '1.2.0'
+VERSION = '1.2.1'
 RULES = {
  'sisal': ('info@sisal.it', "inviaci la copia del tuo documento d'identità"),
  'pokerstars': ('info@clienti.pokerstars.it', "inviaci il tuo documento d'identità"),

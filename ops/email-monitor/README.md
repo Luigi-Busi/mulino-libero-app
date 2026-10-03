@@ -4,7 +4,7 @@ Release indipendente del Mulino, versionata nello stesso repository sul ramo
 `ops/email-monitor`, con tag `email-monitor-vX.Y.Z`. L'applicazione Mugnaio
 mantiene il proprio ciclo di aggiornamento distinto (attualmente v1.3.2).
 
-La release corrente è `email-monitor-v1.2.0`, schema dati 1. Legge soltanto
+La release corrente è `email-monitor-v1.2.1`, schema dati 1. Legge soltanto
 Sisal Sport e PokerStars; Snai è disattivato nella configurazione privata.
 Usa i colori visualizzati delle celle email e password email: bianco, grigio,
 viola/fucsia ammessi; azzurro, rosso, rosso scuro e altri colori esclusi.
@@ -22,8 +22,10 @@ amministrativa e non vengono ripetuti automaticamente.
 ## Menu e dashboard del Banco
 
 Il codice Apps Script del progetto esistente Auto-Ricezione Dati integra il
-menu Banco 1.0.0. `/menu` apre i comandi; `/account` o `/stato` apre i file e i
-fogli nell'ordine effettivo, con account ordinati per riga e otto per pagina.
+menu Banco 1.0.1. `/menu` apre i comandi; `/account` o `/stato` apre i file e i
+fogli Sisal Sport e PokerStars nell'ordine effettivo, con account ordinati per riga
+e otto per pagina. GoldBet, MyLotteries e Bet365 sono esclusi dalla dashboard;
+i loro comandi di acquisizione esistenti restano disponibili.
 Sono disponibili Attivo, Richiesta documenti, Riattivato, Non monitorato e
 In attesa di controllo. Attivo indica assenza di una richiesta rilevata dal
 monitor, non una verifica diretta dello stato presso l'operatore.
@@ -138,12 +140,12 @@ systemctl start mulino-system-backup.service
 ```
 
 Ripristina i file della release precedente mantenendo registro e configurazione.
-Il rollback dalla 1.2.0 alla 1.1.0 usa automaticamente il token Mugnaio originale:
+Il rollback dalla 1.2.1 alla 1.1.0 usa automaticamente il token Mugnaio originale:
 il vecchio launcher conserva il suo percorso e ignora le nuove opzioni Banco.
 La dashboard Banco resta consultabile con la data dell'ultima sincronizzazione.
 Per annullare anche il menu, selezionare la versione 28 dello stesso deployment
 Apps Script; il suo indirizzo e il webhook Telegram restano invariati. Per
-riattivare la 1.2.0 dopo il rollback, usare deploy con il tag 1.2.0.
+riattivare la 1.2.1 dopo il rollback, usare deploy con il tag 1.2.1.
 Nella prima installazione non esiste una release precedente del monitor.
 Per disattivare questa prima release:
 
