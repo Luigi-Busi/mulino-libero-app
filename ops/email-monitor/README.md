@@ -1,10 +1,10 @@
 # Monitor mail documenti
 
 Release indipendente del Mulino, versionata nello stesso repository sul ramo
-`ops/email-monitor`, con tag `email-monitor-vX.Y.Z`. Il tag `v1.3.0` continua
-a identificare l'applicazione Mugnaio. I due cicli di aggiornamento sono distinti.
+`ops/email-monitor`, con tag `email-monitor-vX.Y.Z`. L'applicazione Mugnaio
+mantiene il proprio ciclo di aggiornamento distinto (attualmente v1.3.2).
 
-La release corrente è `email-monitor-v1.1.0`, schema dati 1. Legge soltanto
+La release corrente è `email-monitor-v1.2.0`, schema dati 1. Legge soltanto
 Sisal Sport e PokerStars; Snai è disattivato nella configurazione privata.
 Usa i colori visualizzati delle celle email e password email: bianco, grigio,
 viola/fucsia ammessi; azzurro, rosso, rosso scuro e altri colori esclusi.
@@ -14,9 +14,41 @@ La prima connessione di una sottoscrizione registra il cursore senza leggere
 o notificare messaggi precedenti.
 
 Il servizio usa IMAP in sola lettura, controlla anche lo spam e invia gli avvisi
-alla chat privata dell'amministratore tramite il Mugnaio. Non avvia il polling
-Telegram e non scrive nei fogli. Gli invii con esito incerto richiedono verifica
+alla chat privata dell'amministratore tramite Il Banco. Non avvia il polling
+Telegram. Aggiorna esclusivamente la scheda dedicata agli stati, senza cambiare
+gli account nei fogli. Gli invii con esito incerto richiedono verifica
 amministrativa e non vengono ripetuti automaticamente.
+
+## Menu e dashboard del Banco
+
+Il codice Apps Script del progetto esistente Auto-Ricezione Dati integra il
+menu Banco 1.0.0. `/menu` apre i comandi; `/account` o `/stato` apre i file e i
+fogli nell'ordine effettivo, con account ordinati per riga e otto per pagina.
+Sono disponibili Attivo, Richiesta documenti, Riattivato, Non monitorato e
+In attesa di controllo. Attivo indica assenza di una richiesta rilevata dal
+monitor, non una verifica diretta dello stato presso l'operatore.
+
+Username, password dell'account ed email si copiano con i pulsanti Telegram.
+La password è nascosta nel testo; la password email non ha un pulsante.
+Apri riga nel foglio apre la riga precisa. I dettagli vengono letti dal foglio
+attuale e i pulsanti non rivelano credenziali di una riga spostata nel frattempo.
+Il menu è riservato all'amministratore nella propria chat privata. Inserimento,
+correzione entro 60 minuti, annullamento, test e ID conservano i controlli originali.
+
+Gli stati vengono sincronizzati dopo ogni ciclo attraverso la webapp Banco
+esistente, protetta dalla chiave già configurata. La scheda `Stato Account Banco`
+nel file Log Ricerca Mail contiene email, operatore, stato, data e consegna;
+non contiene password. La risposta include un digest dei dati ricevuti.
+Un errore di sincronizzazione viene registrato e segnalato, mantenendo le
+notifiche e il registro locale. La dashboard conserva la data dell'ultimo
+controllo completato e si aggiorna con il pulsante Aggiorna.
+
+Il file `banco/Codice.template.gs` è il codice completo senza gli identificativi
+privati degli utenti; `BancoMenu.gs` è l'estensione e `test_banco.cjs` il collaudo.
+Il codice effettivo precedente e aggiornato, le proprietà e i metadati del
+deployment sono conservati sotto `/etc/mulino-email-monitor/banco`, nelle copie
+cifrate. Non sostituire un progetto reale con il template senza configurare
+l'amministratore e gli utenti autorizzati.
 
 ## Notifica della riattivazione
 
@@ -46,7 +78,9 @@ richieste documento già notificate prima dell'introduzione della funzione.
   per conservare e recuperare il servizio insieme al Mulino.
 - Configurazione reale e riferimenti della release: `/etc/mulino-email-monitor`.
 - Registro e cursori: `/opt/mulino-libero/data/email-monitor`.
-- Credenziali: file già presenti in `/opt/mulino-libero/secrets`.
+- Credenziali IMAP e Google: file presenti in `/opt/mulino-libero/secrets`.
+- Token Banco e collegamento privato: `/etc/mulino-email-monitor/banco-token`
+  e `banco-webhook.json`. Non modificano i segreti dell'applicazione Mugnaio.
 - Codice installato e copie delle release: `/usr/local/lib/mulino-email-monitor`.
 
 Credenziali, configurazione reale, registro e dati dei fogli non entrano in Git.
@@ -104,6 +138,12 @@ systemctl start mulino-system-backup.service
 ```
 
 Ripristina i file della release precedente mantenendo registro e configurazione.
+Il rollback dalla 1.2.0 alla 1.1.0 usa automaticamente il token Mugnaio originale:
+il vecchio launcher conserva il suo percorso e ignora le nuove opzioni Banco.
+La dashboard Banco resta consultabile con la data dell'ultima sincronizzazione.
+Per annullare anche il menu, selezionare la versione 28 dello stesso deployment
+Apps Script; il suo indirizzo e il webhook Telegram restano invariati. Per
+riattivare la 1.2.0 dopo il rollback, usare deploy con il tag 1.2.0.
 Nella prima installazione non esiste una release precedente del monitor.
 Per disattivare questa prima release:
 
@@ -129,7 +169,7 @@ evita il controllo a ritroso durante i normali aggiornamenti e rollback.
 
 ## Collaudo
 
-94 test: selezione dei fogli, colori, mittenti e oggetti, IMAP readonly,
+104 test Python: selezione dei fogli, colori, mittenti e oggetti, IMAP readonly,
 inizializzazione senza storico, limiti orari e cambio ora, riavvii,
 duplicati, consegna Telegram, backup/ripristino, aggiornamento,
 rollback e recupero da interruzione. Esecuzione in Linux, Python 3.12:
@@ -137,3 +177,6 @@ rollback e recupero da interruzione. Esecuzione in Linux, Python 3.12:
 ```sh
 PYTHONPATH=ops/email-monitor:ops/recovery python3 -m unittest discover -s ops/email-monitor
 ```
+
+30 test del menu e dell'integrazione con i comandi esistenti, con dati fittizi:
+`node ops/email-monitor/banco/test_banco.cjs`.

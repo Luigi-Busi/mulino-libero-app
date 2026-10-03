@@ -1,0 +1,61 @@
+const fs=require('fs'),vm=require('vm'),assert=require('assert'),crypto=require('crypto');
+const root=__dirname;
+const source=fs.readFileSync(root+'/Codice.template.gs','utf8');
+let count=0;
+function fixture(){
+ const calls=[],props={TELEGRAM_TOKEN:'FAKE_TEST_TOKEN',SPREADSHEET_ID:'main',SPREADSHEET_ID_SUPPLYER:'supplier',SPREADSHEET_ID_LOG_MAIL:'log',WEBHOOK_SECRET:'test-secret'};
+ const header=['Data Apertura','','','Nome Cognome','Username','Password','E-mail','Password E-mail','ID_MULINO'];
+ const data=[header,['','','','Mario Rossi','mario-user','PRIVATE_GAME_PASSWORD','one@libero.it','PRIVATE_MAIL_PASSWORD','id1'],['','','','Luigi Bianchi','luigi-user','pw2','docs@libero.it','mailpw','id2'],['','','','Paolo Verdi','paolo-user','pw3','back@libero.it','mailpw','id3']];
+ function sheet(name,id,rows=data){
+  const s={name,id,rows:rows.map(r=>[...r]),colors:rows.map(r=>r.map(()=> '#ffffff'))};
+  s.getName=()=>s.name;s.getSheetId=()=>s.id;s.getLastRow=()=>s.rows.length;s.getLastColumn=()=>s.rows[0].length;
+  s.getMaxRows=()=>1000;s.insertRowsAfter=()=>{};
+  s.getRange=(r,c,h,w)=>{const range={getDisplayValues:()=>s.rows.slice(r-1,r-1+h).map(x=>x.slice(c-1,c-1+w)),getBackgrounds:()=>s.colors.slice(r-1,r-1+h).map(x=>x.slice(c-1,c-1+w)),setNumberFormat:()=>range,setValues:v=>{s.rows=v.map(x=>[...x]);return range;}};return range;};
+  s.getDataRange=()=>({getDisplayValues:()=>s.rows});return s;
+ }
+ const sisal=sheet('Sisal Sport',10),ps=sheet('PokerStars',11),gold=sheet('GoldBet',12),lottery=sheet('MyLotteriesPlay',13);
+ const bet=sheet('Bet365',20,[['Nome Cliente','Email Usata','Password'],['Anna Neri','anna@example.it','bet-password']]);
+ const mirror=sheet('Stato Account Banco',30,[['email','operatore','stato','ultima_variazione','monitorato','ultimo_controllo','consegna','id_evento'],['__meta__','1','','','','2026-10-03T06:00:00+00:00','',''],['one@libero.it','sisal','active','','1','','',''],['docs@libero.it','sisal','documents','2026-10-02T10:00:00+00:00','1','','sent','doc'],['back@libero.it','sisal','reactivated','2026-10-03T06:00:00+00:00','1','','sent','react']]);
+ const book=(name,sheets)=>({getName:()=>name,getSheets:()=>sheets,getSheetByName:n=>sheets.find(s=>s.name===n),insertSheet:n=>{const s=sheet(n,40,[]);sheets.push(s);return s;}});
+ const books={main:book('Principale',[gold,sisal,ps,lottery]),supplier:book('Supplyer',[bet]),log:book('Log',[mirror])};
+ const ctx=vm.createContext({console,PropertiesService:{getScriptProperties:()=>({getProperty:k=>props[k]||null,setProperty:(k,v)=>props[k]=v,deleteProperty:k=>delete props[k]})},SpreadsheetApp:{openById:id=>{calls.push(['open',id]);if(!books[id])throw Error();return books[id];}},UrlFetchApp:{fetch:(url,options)=>{calls.push(['telegram',url.split('/').pop(),JSON.parse(options.payload)]);return {getResponseCode:()=>200,getContentText:()=>JSON.stringify({ok:true,result:{message_id:99}})};}},Utilities:{DigestAlgorithm:{SHA_256:1},Charset:{UTF_8:1},computeDigest:(_,raw)=>[...crypto.createHash('sha256').update(raw).digest()],formatDate:(d)=>d.toISOString().slice(0,16)},CacheService:{getScriptCache:()=>({get:()=>null,put:()=>{}})},LockService:{getScriptLock:()=>({waitLock:()=>{},releaseLock:()=>{}})},HtmlService:{createHtmlOutput:()=>({})},ContentService:{createTextOutput:()=>({setMimeType:()=>({})}),MimeType:{TEXT:'text/plain'}}});
+ vm.runInContext(source,ctx);
+ ctx.SpreadsheetApp.flush=()=>{};
+ ctx.ContentService.createTextOutput=text=>({setMimeType:()=>({text})});
+ const admin=vm.runInContext('ADMIN_TELEGRAM_ID',ctx);
+ const message=(text,id=admin,type='private')=>({from:{id},chat:{id,type},message_id:42,text});
+ const callback=(data,id=admin,type='private')=>({callback_query:{id:'cb',from:{id},message:message('menu',id,type),data}});
+ return {ctx,calls,props,sisal,ps,gold,bet,mirror,message,callback,admin};
+}
+function test(name,fn){fn();count++;console.log('OK '+name);}
+test('admin menu sends no credentials',()=>{const f=fixture();assert(f.ctx.bancoGestisciUpdate({message:f.message('/menu')}));const p=f.calls.find(c=>c[0]==='telegram')[2];assert(p.text.includes('Il Banco'));assert(!JSON.stringify(p).includes('PRIVATE_GAME_PASSWORD'));});
+test('other user cannot open sheets',()=>{const f=fixture();f.ctx.bancoGestisciUpdate({message:f.message('/account','other')});assert(!f.calls.some(c=>c[0]==='open'));});
+test('admin group cannot open sheets',()=>{const f=fixture();f.ctx.bancoGestisciUpdate({message:f.message('/account',f.admin,'group')});assert(!f.calls.some(c=>c[0]==='open'));});
+test('spoofed callback cannot read account',()=>{const f=fixture();f.ctx.bancoGestisciUpdate(f.callback('bn:a:0:10:2:abcdef123456:0','other'));assert(!f.calls.some(c=>c[0]==='open'));});
+test('inline callback without private chat rejected',()=>{const f=fixture();const cb=f.callback('bn:root');delete cb.callback_query.message;f.ctx.bancoGestisciUpdate(cb);assert(!f.calls.some(c=>c[0]==='open'));});
+test('book and sheet order follows actual sheets',()=>{const f=fixture();const r=f.ctx.bancoRoot_();const names=r.buttons.slice(0,5).map(r=>r[0].text);assert.deepEqual([...names],['Apri GoldBet','Apri Sisal Sport','Apri PokerStars','Apri MyLotteriesPlay','Apri Bet365']);assert(r.text.indexOf('Principale')<r.text.indexOf('Supplyer'));});
+test('account rows preserve physical order',()=>{const f=fixture();const r=f.ctx.bancoSheet_(0,10,0);assert(r.buttons[0][0].text.includes('Mario'));assert(r.buttons[1][0].text.includes('Luigi'));assert(r.buttons[2][0].text.includes('Paolo'));});
+test('states distinguish active document and reactivated',()=>{const f=fixture();const r=f.ctx.bancoSheet_(0,10,0);assert(r.buttons[0][0].text.includes('Attivo'));assert(r.buttons[1][0].text.includes('Richiesta documenti'));assert(r.buttons[2][0].text.includes('Riattivato'));});
+test('password hidden in text copied in dedicated button',()=>{const f=fixture();const a=f.ctx.bancoAccounts_(f.ctx.bancoFindSheet_(0,10),true)[0];const r=f.ctx.bancoAccount_(0,10,2,a.fingerprint,0);assert(!r.text.includes('PRIVATE_GAME_PASSWORD'));assert.equal(r.buttons[0].find(b=>b.text.includes('password')).copy_text.text,'PRIVATE_GAME_PASSWORD');assert(!JSON.stringify(r.buttons).includes('PRIVATE_MAIL_PASSWORD'));});
+test('username and email copy exact values',()=>{const f=fixture();const a=f.ctx.bancoAccounts_(f.ctx.bancoFindSheet_(0,10),true)[0];const r=f.ctx.bancoAccount_(0,10,2,a.fingerprint,0);assert.equal(r.buttons[0][0].copy_text.text,'mario-user');assert.equal(r.buttons[0][2].copy_text.text,'one@libero.it');});
+test('callbacks contain no credentials and fit Telegram limits',()=>{const f=fixture();const r=f.ctx.bancoSheet_(0,10,0);for(const b of r.buttons.flat()){assert(Buffer.byteLength(b.callback_data)<=64);assert(!b.callback_data.includes('PASSWORD'));assert(!b.callback_data.includes('@'));}});
+test('reordered row cannot disclose wrong account',()=>{const f=fixture();const a=f.ctx.bancoAccounts_(f.ctx.bancoFindSheet_(0,10),true)[0];[f.sisal.rows[1],f.sisal.rows[2]]=[f.sisal.rows[2],f.sisal.rows[1]];const r=f.ctx.bancoAccount_(0,10,2,a.fingerprint,0);assert(r.text.includes('cambiata'));assert(!JSON.stringify(r).includes('PRIVATE_GAME_PASSWORD'));});
+test('red account overrides prior active state',()=>{const f=fixture();f.sisal.colors[1][6]=f.sisal.colors[1][7]='#ff0000';assert(f.ctx.bancoSheet_(0,10,0).buttons[0][0].text.includes('Non monitorato'));});
+test('cyan and discordant cells remain excluded',()=>{const f=fixture();f.sisal.colors[1][6]=f.sisal.colors[1][7]='#00ffff';f.sisal.colors[2][6]='#ff00ff';const r=f.ctx.bancoSheet_(0,10,0);assert(r.buttons[0][0].text.includes('Non monitorato'));assert(r.buttons[1][0].text.includes('Non monitorato'));});
+test('missing mirror does not claim account active',()=>{const f=fixture();f.mirror.rows=[];assert(f.ctx.bancoSheet_(0,10,0).buttons[0][0].text.includes('In attesa'));});
+test('non monitored operator clearly labelled',()=>{const f=fixture();assert(f.ctx.bancoSheet_(0,12,0).buttons[0][0].text.includes('Non monitorato'));});
+test('Bet365 layout supports email password without username',()=>{const f=fixture();const a=f.ctx.bancoAccounts_(f.ctx.bancoFindSheet_(1,20),true)[0];assert.equal(a.email,'anna@example.it');assert.equal(a.password,'bet-password');assert.equal(a.username,'');});
+test('pagination clamps stale page and retains order',()=>{const f=fixture();for(let i=0;i<12;i++){f.sisal.rows.push(['','','','Extra '+i,'extra'+i,'pw','extra'+i+'@libero.it','mpw','id'+i]);f.sisal.colors.push(f.sisal.colors[1]);}const r=f.ctx.bancoSheet_(0,10,999);assert(r.text.includes('Pagina 2/2'));assert(r.buttons[0][0].text.includes('Extra 5'));});
+test('direct row link includes correct worksheet and row',()=>{const f=fixture();const a=f.ctx.bancoAccounts_(f.ctx.bancoFindSheet_(0,10),true)[0];const r=f.ctx.bancoAccount_(0,10,2,a.fingerprint,0);assert(r.buttons[1][0].url.endsWith('#gid=10&range=A2:Z2'));});
+test('legacy correction callback retains original handler',()=>{const f=fixture();f.props['LAST_'+f.admin]=JSON.stringify({timestamp:Date.now()});f.ctx.inviaTelegram=(chat,text)=>f.calls.push(['legacy',text]);const update=f.callback('bn:cmd:correggi');update.update_id=123;f.ctx.doPost({parameter:{key:'test-secret'},postData:{contents:JSON.stringify(update)}});assert.equal(f.props['CORRECT_'+f.admin],'1');assert(f.calls.some(c=>c[0]==='legacy' && c[1].includes('dati corretti')));});
+test('legacy test callback keeps test handler',()=>{const f=fixture();let called=false;f.ctx.eseguiTest=()=>called=true;const update=f.callback('bn:cmd:test');update.update_id=124;f.ctx.doPost({parameter:{key:'test-secret'},postData:{contents:JSON.stringify(update)}});assert(called);});
+test('ordinary account text continues to original parser',()=>{const f=fixture();let called=false;f.ctx.gestisciInserimento=()=>called=true;f.ctx.inviaTelegram=()=>99;f.ctx.eliminaMessaggioTelegram=()=>{};f.ctx.doPost({parameter:{key:'test-secret'},postData:{contents:JSON.stringify({update_id:125,message:f.message('Sisal\nNome: Test\nUsername: example\nPassword: fake')})}});assert(called);});
+test('wrong webhook secret never reads sheet or sends data',()=>{const f=fixture();f.ctx.doPost({parameter:{key:'wrong'},postData:{contents:JSON.stringify({message:f.message('/account')})}});assert.equal(f.calls.length,0);});
+test('invalid callback produces no row lookup',()=>{const f=fixture();f.ctx.bancoGestisciUpdate(f.callback('bn:a:0:10:-2:abcdef123456:0'));assert(!f.calls.some(c=>c[0]==='open'));});
+test('copy values exceeding Telegram limit are not truncated',()=>{const f=fixture();f.sisal.rows[1][5]='x'.repeat(257);const a=f.ctx.bancoAccounts_(f.ctx.bancoFindSheet_(0,10),true)[0];const r=f.ctx.bancoAccount_(0,10,2,a.fingerprint,0);assert(!r.buttons[0].some(b=>b.text.includes('password')));});
+test('authenticated status sync confirms exact digest',()=>{const f=fixture();const rows=f.mirror.rows.map(r=>[...r]);const result=f.ctx.doPost({parameter:{key:'test-secret'},postData:{contents:JSON.stringify({banco_status_sync:rows})}});const answer=JSON.parse(result.text);assert(answer.ok);assert.equal(answer.digest,crypto.createHash('sha256').update(JSON.stringify(rows)).digest('hex'));assert(!f.calls.some(c=>c[0]==='telegram'));});
+test('wrong secret cannot synchronize states',()=>{const f=fixture();const before=JSON.stringify(f.mirror.rows);f.ctx.doPost({parameter:{key:'wrong'},postData:{contents:JSON.stringify({banco_status_sync:f.mirror.rows})}});assert.equal(JSON.stringify(f.mirror.rows),before);assert.equal(f.calls.length,0);});
+test('state synchronization cannot overwrite other log data',()=>{const f=fixture();const rows=f.mirror.rows.map(r=>[...r]);f.mirror.rows=[['Other','Log']];assert.throws(()=>f.ctx.bancoRiceviStati_(rows));assert.equal(f.mirror.rows[0][0],'Other');});
+test('state payload rejects extra or credential columns',()=>{const f=fixture();const rows=f.mirror.rows.map(r=>[...r]);rows[2].push('PASSWORD');assert.throws(()=>f.ctx.bancoRiceviStati_(rows));assert(!f.calls.some(c=>c[0]==='open'));});
+test('formula-like email remains plain text',()=>{const f=fixture();const rows=f.mirror.rows.map(r=>[...r]);rows[2][0]='=example@libero.it';f.ctx.bancoRiceviStati_(rows);assert.equal(f.mirror.rows[2][0],"'=example@libero.it");});
+console.log('PASSED='+count);

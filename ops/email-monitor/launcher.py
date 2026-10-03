@@ -8,6 +8,8 @@ if sys.argv[1]=='cleanup':
  subprocess.run(['docker','stop','--time','10','mulino-email-monitor-once'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
  raise SystemExit(0)
 image=json.loads(Path('/etc/mulino-email-monitor/runtime.json').read_text())['image']
+config=json.loads(Path('/etc/mulino-email-monitor/config.json').read_text())
+token='/etc/mulino-email-monitor/banco-token' if config.get('telegram_bot')=='banco' else '/opt/mulino-libero/secrets/telegram-bot-token'
 args=['docker','run','--rm','--name','mulino-email-monitor-'+sys.argv[1],
  '--read-only','--cap-drop=ALL','--security-opt=no-new-privileges','--init',
  '--memory=256m','--cpus=0.25','--pids-limit=80','--user=0:0','--tmpfs','/tmp:rw,noexec,nosuid,size=16m',
@@ -15,8 +17,11 @@ args=['docker','run','--rm','--name','mulino-email-monitor-'+sys.argv[1],
  '--mount','type=bind,src=/usr/local/lib/mulino-email-monitor,dst=/monitor,readonly',
  '--mount','type=bind,src=/etc/mulino-email-monitor,dst=/config,readonly',
  '--mount','type=bind,src=/opt/mulino-libero/secrets/google-service-account.json,dst=/credentials.json,readonly',
- '--mount','type=bind,src=/opt/mulino-libero/secrets/telegram-bot-token,dst=/telegram-token,readonly',
+ '--mount','type=bind,src='+token+',dst=/telegram-token,readonly',
  '--mount','type=bind,src=/opt/mulino-libero/secrets/libero-password,dst=/libero-password,readonly',
  '--mount','type=bind,src=/opt/mulino-libero/data/email-monitor,dst=/state',
- image,'/monitor/email_monitor.py',sys.argv[1]]
+ ]
+if Path('/etc/mulino-email-monitor/banco-webhook.json').exists():
+ args+=['--mount','type=bind,src=/etc/mulino-email-monitor/banco-webhook.json,dst=/banco-webhook.json,readonly']
+args+=[image,'/monitor/email_monitor.py',sys.argv[1]]
 raise SystemExit(subprocess.call(args))

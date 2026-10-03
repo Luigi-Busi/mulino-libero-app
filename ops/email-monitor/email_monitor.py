@@ -24,7 +24,7 @@ import time
 import unicodedata
 from zoneinfo import ZoneInfo
 
-VERSION = '1.1.0'
+VERSION = '1.2.0'
 RULES = {
  'sisal': ('info@sisal.it', "inviaci la copia del tuo documento d'identità"),
  'pokerstars': ('info@clienti.pokerstars.it', "inviaci il tuo documento d'identità"),
@@ -392,11 +392,13 @@ def notification(event,accounts,reactivation=False):
 class Telegram:
  def __init__(self,config):
   import requests
-  self.session=requests.Session();self.token=Path(config['telegram_token_file']).read_text().strip();self.chat=config['telegram_chat_id']
+  self.session=requests.Session();self.token=Path(config['telegram_token_file']).read_text().strip();self.chat=config['telegram_chat_id'];self.dashboard_button=bool(config.get('dashboard_status'))
  def send(self,text):
   # No requests logging / raise_for_status: URLs contain the secret token.
   try:
-   response=self.session.post(f'https://api.telegram.org/bot{self.token}/sendMessage',json={'chat_id':self.chat,'text':text,'link_preview_options':{'is_disabled':True}},timeout=(10,30))
+   payload={'chat_id':self.chat,'text':text,'link_preview_options':{'is_disabled':True}}
+   if getattr(self,'dashboard_button',False):payload['reply_markup']={'inline_keyboard':[[{'text':'📊 Stato account','callback_data':'bn:root'}]]}
+   response=self.session.post(f'https://api.telegram.org/bot{self.token}/sendMessage',json=payload,timeout=(10,30))
   except Exception:return ('uncertain',None,0,'NETWORK_UNCERTAIN')
   try:body=response.json()
   except ValueError:return ('uncertain',None,0,'RESPONSE_UNCERTAIN')
@@ -439,6 +441,51 @@ def atomic_json(path,value):
  with temp.open('w',encoding='utf-8') as f:
   json.dump(value,f,ensure_ascii=False,indent=2);f.write('\n');f.flush();os.fsync(f.fileno())
  os.chmod(temp,0o600);os.replace(temp,path)
+
+MIRROR_HEADERS=['email','operatore','stato','ultima_variazione','monitorato','ultimo_controllo','consegna','id_evento']
+
+def mirror_rows(state,stamp):
+ rows=[MIRROR_HEADERS,['__meta__','1','','','',stamp,'','']]
+ for sub in state.db.execute('SELECT * FROM subscriptions ORDER BY operator,email'):
+  candidates=[]
+  for table,kind in [('events','documents'),('followup_events','reactivated')]:
+   for event in state.db.execute(f"SELECT * FROM {table} WHERE email=? AND operator=? AND status!='cancelled'",(sub['email'],sub['operator'])):
+    try:received=received_time(event['received'])
+    except ValueError:continue
+    candidates.append((received,kind,event['status'],event['event_key']))
+  latest=max(candidates,key=lambda x:(x[0],x[1]=='reactivated'),default=None)
+  rows.append([sub['email'],sub['operator'],latest[1] if latest else 'active',latest[0].isoformat() if latest else '',str(sub['active']),stamp,latest[2] if latest else '',latest[3] if latest else ''])
+ return rows
+
+def publish_dashboard(config,state,client=None):
+ target=config.get('dashboard_status')
+ if not target:return
+ checked=state.db.execute('SELECT finished FROM runs WHERE finished IS NOT NULL ORDER BY id DESC LIMIT 1').fetchone()
+ rows=mirror_rows(state,checked[0] if checked else '')
+ if target.get('webhook_file'):
+  import requests
+  bridge=json.loads(Path(target['webhook_file']).read_text())
+  # Use the Banco's existing authenticated web app; no extra Google grants.
+  response=requests.post(bridge['url'],json={'banco_status_sync':rows},timeout=(10,45))
+  answer=response.json()
+  digest=hashlib.sha256(json.dumps(rows,separators=(',',':'),ensure_ascii=False).encode()).hexdigest()
+  if response.status_code!=200 or answer.get('ok') is not True or answer.get('digest')!=digest:raise RuntimeError('Dashboard sync not confirmed')
+  return
+ if client is None:
+  import gspread
+  client=gspread.service_account(filename=config['google_credentials'],scopes=['https://www.googleapis.com/auth/spreadsheets'])
+  client.set_timeout(45)
+ book=client.open_by_key(target['book'])
+ # A unique named tab is created once; every other tab is left intact.
+ matches=[sheet for sheet in book.worksheets() if sheet.title==target['sheet']]
+ if len(matches)>1:raise ValueError('Ambiguous dashboard tab')
+ sheet=matches[0] if matches else book.add_worksheet(title=target['sheet'],rows=1000,cols=8)
+ previous=sheet.get_all_values()
+ if previous and previous[0]!=MIRROR_HEADERS:raise ValueError('Dashboard tab contains other data')
+ if len(rows)>sheet.row_count:sheet.resize(rows=len(rows)+100)
+ # One atomic range update includes empty old rows, avoiding transient empty state.
+ count=max(len(rows),len(previous));payload=rows+[['']*8 for _ in range(count-len(rows))]
+ sheet.update(range_name=f'A1:H{count}',values=payload,value_input_option='RAW')
 
 def run_cycle(config,state,source=None,scanner=None,sender=None,sleep=time.sleep):
  if not within_hours(config):return {'status':'outside_operating_hours','errors':[],'started':now(),'finished':now()}
@@ -489,6 +536,11 @@ def run_cycle(config,state,source=None,scanner=None,sender=None,sleep=time.sleep
   summary['status']='failed';summary['errors'].append({'code':error_code(exc)})
  summary['finished']=now()
  with state.db:state.db.execute('UPDATE runs SET finished=?,summary=? WHERE id=?',(summary['finished'],json.dumps(summary),rid))
+ try:publish_dashboard(config,state)
+ except Exception as exc:
+  summary['errors'].append({'code':error_code(exc),'phase':'dashboard_sync'})
+  if summary['status']=='ok':summary['status']='degraded'
+  with state.db:state.db.execute('UPDATE runs SET summary=? WHERE id=?',(json.dumps(summary),rid))
  atomic_json(config['status_file'],summary)
  # Keep compact aggregate history; event ledger and cursors are retained.
  with state.db:state.db.execute('DELETE FROM runs WHERE id < ?',(max(0,rid-720),))

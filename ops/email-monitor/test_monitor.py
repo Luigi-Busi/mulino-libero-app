@@ -328,4 +328,64 @@ class FollowupTest(unittest.TestCase):
   self.assertEqual(summary['status'],'ok');self.assertEqual(summary['reactivation_delivery'],{'sent':1})
   self.assertEqual(source.load.call_count,2);sender.send.assert_called_once()
 
+class DashboardMirrorTest(unittest.TestCase):
+ setUp=StateTest.setUp
+ tearDown=StateTest.tearDown
+ event=StateTest.event
+ def test_mirror_active_subscription_has_no_credentials(self):
+  rows=m.mirror_rows(self.state,'2026-10-03T06:00:00+00:00')
+  self.assertEqual(rows[2][2],'active');self.assertEqual(rows[2][4],'1')
+  self.assertNotIn('password',json.dumps(rows).lower())
+ def test_mirror_uses_latest_request_or_reactivation_received_time(self):
+  self.event();sender=Mock();sender.send.return_value=('sent',1,0,None);m.deliver(self.state,[ACCOUNT],sender)
+  watch=self.state.db.execute('SELECT * FROM followups').fetchone()
+  with self.state.db:self.state.enqueue_followup(watch,raw(subject="Il tuo account e' stato riattivato",mid='<react>'),'03-Oct-2026 07:00:00 +0000')
+  self.assertEqual(m.mirror_rows(self.state,'stamp')[2][2],'reactivated')
+  with self.state.db:self.state.enqueue(ACCOUNT.email,'sisal',raw(mid='<new-doc>'),'04-Oct-2026 09:00:00 +0000')
+  self.assertEqual(m.mirror_rows(self.state,'stamp')[2][2],'documents')
+ def test_inactive_subscription_never_reported_as_monitored(self):
+  self.event();self.state.sync([])
+  self.assertEqual(m.mirror_rows(self.state,'stamp')[2][4],'0')
+ def test_dashboard_write_is_raw_and_clears_only_old_range_tail(self):
+  book=Mock();sheet=Mock();sheet.title='Banco';sheet.row_count=1000
+  sheet.get_all_values.return_value=[m.MIRROR_HEADERS]+[['old']*8]*5
+  book.worksheets.return_value=[sheet];client=Mock();client.open_by_key.return_value=book
+  m.publish_dashboard({'dashboard_status':{'book':'log','sheet':'Banco'}},self.state,client)
+  args=sheet.update.call_args.kwargs
+  self.assertEqual(args['value_input_option'],'RAW');self.assertEqual(args['range_name'],'A1:H6')
+  self.assertEqual(args['values'][-1],['']*8);sheet.clear.assert_not_called();book.add_worksheet.assert_not_called()
+ def test_existing_tab_with_other_data_never_overwritten(self):
+  sheet=Mock();sheet.title='Banco';sheet.get_all_values.return_value=[['Existing','data']]
+  book=Mock();book.worksheets.return_value=[sheet];client=Mock();client.open_by_key.return_value=book
+  with self.assertRaises(ValueError):m.publish_dashboard({'dashboard_status':{'book':'log','sheet':'Banco'}},self.state,client)
+  sheet.update.assert_not_called()
+ def test_disabled_dashboard_performs_no_google_writes(self):
+  client=Mock();m.publish_dashboard({},self.state,client);client.open_by_key.assert_not_called()
+ def test_sync_uses_actual_last_check_not_manual_publish_time(self):
+  with self.state.db:self.state.db.execute("INSERT INTO runs(started,finished) VALUES('start','2026-10-02T19:00:00+00:00')")
+  sheet=Mock();sheet.title='Banco';sheet.row_count=1000;sheet.get_all_values.return_value=[]
+  book=Mock();book.worksheets.return_value=[sheet];client=Mock();client.open_by_key.return_value=book
+  m.publish_dashboard({'dashboard_status':{'book':'log','sheet':'Banco'}},self.state,client)
+  self.assertEqual(sheet.update.call_args.kwargs['values'][1][5],'2026-10-02T19:00:00+00:00')
+ def bridge(self):
+  path=Path(self.temp.name)/'bridge.json';path.write_text(json.dumps({'url':'https://script.google.com/test?key=TEST_SECRET'}))
+  return {'dashboard_status':{'webhook_file':str(path)}}
+ def test_webhook_sync_requires_matching_confirmation_digest(self):
+  cfg=self.bridge();expected=m.mirror_rows(self.state,'')
+  digest=m.hashlib.sha256(json.dumps(expected,separators=(',',':'),ensure_ascii=False).encode()).hexdigest()
+  response=Mock();response.status_code=200;response.json.return_value={'ok':True,'digest':digest}
+  with patch('requests.post',return_value=response) as post:m.publish_dashboard(cfg,self.state)
+  self.assertEqual(post.call_args.kwargs['json'],{'banco_status_sync':expected})
+ def test_mismatched_or_missing_webhook_confirmation_fails(self):
+  cfg=self.bridge();response=Mock();response.status_code=200;response.json.return_value={'ok':True,'digest':'wrong'}
+  with patch('requests.post',return_value=response):
+   with self.assertRaises(RuntimeError):m.publish_dashboard(cfg,self.state)
+ def test_sync_errors_do_not_expose_secret_url_in_cycle_summary(self):
+  cfg={**CONFIG,**self.bridge(),'status_file':str(Path(self.temp.name)/'status.json'),'password_file':str(Path(self.temp.name)/'pw')}
+  Path(cfg['password_file']).write_text('test-password');source=Mock();source.load.return_value=([ACCOUNT],{'Sisal Sport':{'eligible':1}})
+  scanner=Mock();scanner.scan.return_value=({},[])
+  with patch('requests.post',side_effect=OSError('TEST_SECRET')):
+   result=m.run_cycle(cfg,self.state,source=source,scanner=scanner,sleep=lambda _:None)
+  self.assertEqual(result['status'],'degraded');self.assertNotIn('TEST_SECRET',json.dumps(result))
+
 if __name__=='__main__':unittest.main(verbosity=2)
