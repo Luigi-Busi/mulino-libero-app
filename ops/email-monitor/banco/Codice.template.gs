@@ -215,7 +215,12 @@ function doPost(e) {
 
     // Authenticated state sync uses the same existing webhook secret.
     if (update && Array.isArray(update.banco_status_sync)) {
-      return bancoRiceviStati_(update.banco_status_sync);
+      const result=bancoRiceviStati_(update.banco_status_sync);
+      bancoInvalidate_();
+      return result;
+    }
+    if (update && Number.isSafeInteger(update.banco_notice_message)) {
+      return bancoExternalNotice_(update.banco_notice_message);
     }
 
     // ========================================================
@@ -3554,9 +3559,7 @@ function registraNuovoMessaggioAccount(
     daEliminare
   ) {
 
-    eliminaOperazioneDallaChat(
-      operazione
-    );
+    // Account acquisition messages are retained.
   }
 }
 
@@ -3623,9 +3626,7 @@ function sostituisciUltimoMessaggioAccount(
     vecchiaOperazione
   ) {
 
-    eliminaOperazioneDallaChat(
-      vecchiaOperazione
-    );
+    // The previous acquisition confirmation is retained after correction.
   }
 }
 
@@ -4122,6 +4123,7 @@ function inviaTelegram(
     json.result.message_id
   ) {
 
+    bancoLegacySent_(chatId,json.result.message_id,testo);
     return (
       json.result.message_id
     );
@@ -4140,6 +4142,7 @@ function eliminaMessaggioTelegram(
   chatId,
   messageId
 ) {
+  if (bancoSkipLegacyDelete_(chatId,messageId)) return;
 
   if (
     !chatId ||
@@ -4234,6 +4237,7 @@ function eliminaMessaggioTelegram(
 // ============================================================
 
 function rispostaOK() {
+  bancoFinalize_();
 
   return HtmlService
     .createHtmlOutput(
@@ -4545,7 +4549,7 @@ function numeroColonnaLettera(
 }
 
 // Il Banco: private account dashboard. No credentials in logs/cache/callback_data.
-const BANCO_MENU_VERSION = '1.0.1';
+const BANCO_MENU_VERSION = '1.1.0';
 const BANCO_STATUS_TAB = 'Stato Account Banco';
 const BANCO_PAGE_SIZE = 8;
 const BANCO_COLORS = ['#ffffff','#ff00ff','#9900ff','#d9d2e9','#b4a7d6','#8e7cc3','#674ea7','#351c75','#20124d'];
@@ -4586,7 +4590,7 @@ function bancoRiceviStati_(rows) {
     sheet.getRange(1,1,total,8).setNumberFormat('@').setValues(payload);
     SpreadsheetApp.flush();
     const digest=Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256,JSON.stringify(rows),Utilities.Charset.UTF_8).map(v=>('0'+((v+256)%256).toString(16)).slice(-2)).join('');
-    return ContentService.createTextOutput(JSON.stringify({ok:true,rows:rows.length,digest:digest,version:BANCO_MENU_VERSION})).setMimeType(ContentService.MimeType.JSON);
+    return ContentService.createTextOutput(JSON.stringify({ok:true,rows:rows.length,digest:digest,version:BANCO_MENU_VERSION,chat_state:bancoChatRead_()})).setMimeType(ContentService.MimeType.JSON);
   } finally {lock.releaseLock();}
 }
 
@@ -4613,28 +4617,28 @@ function bancoPrivateAdmin_(actor, chat) {
     String(actor.id) === String(ADMIN_TELEGRAM_ID) && String(chat.id) === String(ADMIN_TELEGRAM_ID);
 }
 
-function bancoRender_(chat, message, view) {
-  const data = {chat_id: String(chat.id), text: view.text.slice(0,3900),
-    reply_markup: {inline_keyboard: view.buttons}, link_preview_options: {is_disabled:true}};
-  if (message) {data.message_id = message; return bancoApi_('editMessageText', data);}
-  return bancoApi_('sendMessage', data);
-}
+function bancoRender_(chat,message,view) {return bancoPanelRender_(chat,message,view);}
 
 function bancoGestisciUpdate(update) {
   const callback = update.callback_query;
   const message = callback ? callback.message : update.message;
   const text = String(message && message.text || '').trim();
   const command = text.split(/\s/)[0].split('@')[0].toLowerCase();
-  const data = callback ? String(callback.data || '') : '';
+  let data = callback ? String(callback.data || '') : '';
+  bancoForceRefresh_=data.indexOf('bn:r:')===0;
+  if (bancoForceRefresh_) data=data.replace('bn:r:','bn:');
   const recognized = callback ? data.indexOf('bn:') === 0 : ['/start','/menu','/account','/stato','/help'].indexOf(command) !== -1;
-  if (!recognized) return false;
-  const actor = callback ? callback.from : message.from;
+
+  const actor = callback ? callback.from : message && message.from;
   const chat = message && message.chat;
   if (!bancoPrivateAdmin_(actor,chat)) {
+    if (!recognized) return false;
     if (callback) bancoApi_('answerCallbackQuery',{callback_query_id:callback.id,text:'Menu riservato alla chat privata dell’amministratore.',show_alert:true});
     else if (chat) bancoApi_('sendMessage',{chat_id:chat.id,text:'Menu riservato alla chat privata dell’amministratore.'});
     return true;
   }
+  bancoObserve_(message,callback && /^bn:cmd:/.test(data)?'/'+data.split(':')[2]:command,callback);
+  if (!recognized) return false;
   if (callback) bancoApi_('answerCallbackQuery',{callback_query_id:callback.id});
   // Existing commands continue through the original authorization/correction code.
   if (callback && /^bn:cmd:(correggi|annulla|test|id)$/.test(data)) {
@@ -4679,6 +4683,7 @@ function bancoBooks_() {
   return ['SPREADSHEET_ID'].map((key,index)=>({key:key,index:index,id:props.getProperty(key)})).filter(b=>!!b.id);
 }
 function bancoSheets_() {
+  if (bancoSheetRefs_) return bancoSheetRefs_;
   const result=[];
   bancoBooks_().forEach(b=>{
     const book=SpreadsheetApp.openById(b.id);
@@ -4687,7 +4692,7 @@ function bancoSheets_() {
       if (cfg && ['Sisal Sport','PokerStars'].indexOf(sheet.getName())!==-1) result.push({book:b.id,bookIndex:b.index,bookTitle:book.getName(),sheet:sheet,gid:sheet.getSheetId(),name:sheet.getName()});
     });
   });
-  return result;
+  bancoSheetRefs_=result;return result;
 }
 function bancoFindSheet_(bi,gid) {
   const item=bancoSheets_().find(s=>s.bookIndex===bi && s.gid===gid);
@@ -4708,23 +4713,32 @@ function bancoFingerprint_(a) {
   const raw=[a.name,a.username,a.email,a.stable].join('\n');
   return Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256,raw,Utilities.Charset.UTF_8).map(v=>('0'+((v+256)%256).toString(16)).slice(-2)).join('').slice(0,12);
 }
-function bancoAccounts_(item,withPassword) {
-  const sheet=item.sheet;const last=sheet.getLastRow();
-  if (!last || last>10000) throw new Error('Dimensioni foglio non riconosciute');
+function bancoAccounts_(item,withPassword,rowNumber) {
+  const sheet=item.sheet,cache=CacheService.getScriptCache(),key='bn:'+BANCO_MENU_VERSION+':'+item.book+':'+item.name;
+  if (!withPassword && !bancoForceRefresh_) {
+    try {const hit=cache.get(key);if (hit) return JSON.parse(hit);} catch (_) {}
+  }
+  const last=sheet.getLastRow();if (!last || last>10000) throw new Error('Dimensioni foglio non riconosciute');
   const width=Math.min(sheet.getLastColumn(),26);
-  const values=sheet.getRange(1,1,last,width).getDisplayValues();const headers=bancoHeaders_(values);
-  const colors=sheet.getRange(1,1,last,width).getBackgrounds();
-  const result=[];
-  for (let i=headers.row+1;i<values.length;i++) {
-    const row=values[i];const get=n=>n>=0?String(row[n]||'').trim():'';
+  const headerValues=sheet.getRange(1,1,rowNumber?Math.min(last,30):last,width).getDisplayValues();
+  const headers=bancoHeaders_(headerValues);
+  if (rowNumber && (rowNumber<=headers.row+1 || rowNumber>last)) return [];
+  const start=rowNumber||1;
+  const values=rowNumber?sheet.getRange(rowNumber,1,1,width).getDisplayValues():headerValues;
+  const colors=sheet.getRange(start,1,values.length,width).getBackgrounds();const result=[];
+  for (let i=0;i<values.length;i++) {
+    const physical=start+i;if (physical<=headers.row+1) continue;
+    const row=values[i],get=n=>n>=0?String(row[n]||'').trim():'';
     const name=get(headers.name),username=get(headers.username),email=get(headers.email);
     if (!name || (!username && !email && !get(headers.password))) continue;
-    const a={row:i+1,name:name,username:username,email:email,stable:get(headers.stable),emailColor:headers.email>=0?colors[i][headers.email].toLowerCase():'unknown',mailPasswordColor:headers.mailPassword>=0?colors[i][headers.mailPassword].toLowerCase():'unknown',hasMailPassword:!!get(headers.mailPassword)};
+    const a={row:physical,name:name,username:username,email:email,stable:get(headers.stable),emailColor:headers.email>=0?colors[i][headers.email].toLowerCase():'unknown',mailPasswordColor:headers.mailPassword>=0?colors[i][headers.mailPassword].toLowerCase():'unknown',hasMailPassword:!!get(headers.mailPassword)};
     if (withPassword) a.password=get(headers.password);
     a.fingerprint=bancoFingerprint_(a);result.push(a);
   }
+  if (!withPassword) {try {const raw=JSON.stringify(result);if (raw.length<80000) cache.put(key,raw,45);} catch (_) {}}
   return result;
 }
+
 function bancoMirror_() {
   const id=PropertiesService.getScriptProperties().getProperty('SPREADSHEET_ID_LOG_MAIL');
   const data={states:{},updated:'',available:false};
@@ -4770,7 +4784,7 @@ function bancoRoot_() {
     buttons.push([bancoButton_('Apri '+item.name,'bn:s:'+item.bookIndex+':'+item.gid+':0')]);
   });
   text+='🟢 Attivo · 🟠 Richiesta documenti · ✅ Riattivato\n⚪ Non monitorato · 🔵 In attesa di controllo\n\nUltimo controllo: '+bancoDate_(mirror.updated);
-  buttons.push([bancoButton_('🔄 Aggiorna','bn:root'),bancoButton_('🏠 Menu','bn:menu')]);
+  buttons.push([bancoButton_('🔄 Aggiorna','bn:r:root'),bancoButton_('🏠 Menu','bn:menu')]);
   return {text:text,buttons:buttons};
 }
 function bancoSheet_(bi,gid,requestedPage) {
@@ -4784,11 +4798,11 @@ function bancoSheet_(bi,gid,requestedPage) {
   if (page>0) nav.push(bancoButton_('◀️ Indietro','bn:s:'+bi+':'+gid+':'+(page-1)));
   if (page+1<pages) nav.push(bancoButton_('Avanti ▶️','bn:s:'+bi+':'+gid+':'+(page+1)));
   if (nav.length) buttons.push(nav);
-  buttons.push([bancoButton_('🔄 Aggiorna','bn:s:'+bi+':'+gid+':'+page),bancoButton_('📂 Fogli','bn:root')]);
+  buttons.push([bancoButton_('🔄 Aggiorna','bn:r:s:'+bi+':'+gid+':'+page),bancoButton_('📂 Fogli','bn:root')]);
   return {text:text,buttons:buttons};
 }
 function bancoAccount_(bi,gid,row,fingerprint,page) {
-  const item=bancoFindSheet_(bi,gid),account=bancoAccounts_(item,true).find(a=>a.row===row);
+  const item=bancoFindSheet_(bi,gid),account=bancoAccounts_(item,true,row).find(a=>a.row===row);
   const back='bn:s:'+bi+':'+gid+':'+page;
   if (!account || account.fingerprint!==fingerprint) return {text:'La riga dell’account è cambiata. Apri di nuovo l’elenco per consultare i dati aggiornati.',buttons:[[bancoButton_('📋 Torna agli account',back)]]};
   const mirror=bancoMirror_(),state=bancoState_(item,account,mirror);
@@ -4801,7 +4815,112 @@ function bancoAccount_(bi,gid,row,fingerprint,page) {
     if (pair[1] && Array.from(pair[1]).length<=256) copy.push({text:pair[0],copy_text:{text:pair[1]}});
   });
   if (copy.length) buttons.push(copy);
-  buttons.push([{text:'📄 Apri riga nel foglio',url:'https://docs.google.com/spreadsheets/d/'+item.book+'/edit#gid='+gid+'&range=A'+row+':Z'+row}]);
-  buttons.push([bancoButton_('🔄 Aggiorna','bn:a:'+bi+':'+gid+':'+row+':'+fingerprint+':'+page),bancoButton_('↩️ Account',back)]);
+  buttons.push([bancoButton_('🔄 Aggiorna','bn:r:a:'+bi+':'+gid+':'+row+':'+fingerprint+':'+page),bancoButton_('↩️ Account',back)]);
   return {text:text,buttons:buttons};
+}
+
+
+// Only message IDs, timestamps and explicitly allowed routine categories persist.
+const BANCO_CHAT_KEY = 'BANCO_CHAT_V1';
+let bancoContext_ = null;
+let bancoSheetRefs_ = null;
+let bancoForceRefresh_ = false;
+
+function bancoChatRead_() {
+  let s;
+  try {s=JSON.parse(PropertiesService.getScriptProperties().getProperty(BANCO_CHAT_KEY)||'{}');} catch (_) {s={};}
+  return {panel:Number(s.panel)||0,last:Number(s.last)||0,routines:Array.isArray(s.routines)?s.routines:[],retired:Array.isArray(s.retired)?s.retired:[]};
+}
+function bancoChatWrite_(s) {
+  s.routines=s.routines.slice(-180);s.retired=s.retired.slice(-40);
+  PropertiesService.getScriptProperties().setProperty(BANCO_CHAT_KEY,JSON.stringify(s));
+}
+function bancoChatLock_(fn) {
+  const lock=LockService.getScriptLock();lock.waitLock(15000);
+  try {return fn();} finally {lock.releaseLock();}
+}
+function bancoRoutine_(s,id,kind,at) {
+  if (!Number.isSafeInteger(id)||id<=0||s.routines.some(r=>r[0]===id)) return;
+  s.routines.push([id,at||Date.now(),kind]);
+}
+function bancoObserve_(message,command,callback) {
+  bancoContext_={message:Number(message.message_id)||0,command:command,callback:!!callback};
+  bancoChatLock_(()=>{
+    const s=bancoChatRead_();s.last=Math.max(s.last,bancoContext_.message);
+    if (!callback && ['/start','/menu','/account','/stato','/help','/test','/id','/correggi','/annulla'].indexOf(command)!==-1)
+      bancoRoutine_(s,bancoContext_.message,'c',message.date?message.date*1000:Date.now());
+    bancoChatWrite_(s);
+  });
+}
+function bancoDeleteKnown_(id) {
+  try {bancoApi_('deleteMessage',{chat_id:String(ADMIN_TELEGRAM_ID),message_id:id});return true;}
+  catch (_) {return false;}
+}
+function bancoPanelRender_(chat,requested,view) {
+  return bancoChatLock_(()=>{
+    const s=bancoChatRead_();let result;
+    const data={chat_id:String(chat.id),text:view.text.slice(0,3900),reply_markup:{inline_keyboard:view.buttons},link_preview_options:{is_disabled:true}};
+    // Only a panel we own may be edited or retired. Notification buttons never own it.
+    if (requested && requested===s.panel && s.last<=s.panel) {
+      data.message_id=s.panel;
+      try {result=bancoApi_('editMessageText',data);return result;} catch (_) {delete data.message_id;}
+    }
+    result=bancoApi_('sendMessage',data);
+    const previous=s.panel;s.panel=result.message_id;s.last=Math.max(s.last,s.panel);
+    if (previous && previous!==s.panel && !s.retired.includes(previous)) s.retired.push(previous);
+    bancoChatWrite_(s);
+    // Retired panels are removed immediately; ordinary replies have the 24h rule.
+    s.retired=s.retired.filter(id=>id===s.panel?false:!bancoDeleteKnown_(id));bancoChatWrite_(s);
+    return result;
+  });
+}
+function bancoFinalize_() {
+  if (!bancoContext_) return;
+  const s=bancoChatRead_();
+  if (s.panel && s.last>s.panel) bancoPanelRender_({id:ADMIN_TELEGRAM_ID},null,bancoHome_());
+}
+function bancoLegacySent_(chat,id,text) {
+  if (String(chat)!==String(ADMIN_TELEGRAM_ID)) return;
+  bancoChatLock_(()=>{
+    const s=bancoChatRead_();s.last=Math.max(s.last,Number(id)||0);
+    const ordinary=bancoContext_ && ['/test','/id','/correggi','/annulla'].indexOf(bancoContext_.command)!==-1;
+    const problem=/errore|error|non riesco|fallit|problem|non trovato|mancant|⚠|❌/i.test(String(text));
+    if (ordinary && !problem) bancoRoutine_(s,Number(id),'r');
+    bancoChatWrite_(s);
+  });
+  bancoInvalidate_();
+}
+function bancoSkipLegacyDelete_(chat,id) {
+  return String(chat)===String(ADMIN_TELEGRAM_ID) && bancoContext_ && Number(id)===bancoContext_.message;
+}
+function bancoExternalNotice_(id) {
+  if (!Number.isSafeInteger(id)||id<=0) throw new Error('Identificativo messaggio non valido');
+  bancoChatLock_(()=>{const s=bancoChatRead_();s.last=Math.max(s.last,id);bancoChatWrite_(s);});
+  const s=bancoChatRead_();if (s.panel && s.last>s.panel) bancoPanelRender_({id:ADMIN_TELEGRAM_ID},null,bancoHome_());
+  return ContentService.createTextOutput(JSON.stringify({ok:true})).setMimeType(ContentService.MimeType.JSON);
+}
+function bancoManutenzioneChat() {
+  bancoChatLock_(()=>{
+    const s=bancoChatRead_(),now=Date.now();
+    const latest=Math.max(0,...s.routines.filter(r=>r[2]==='r').map(r=>r[0]));
+    s.retired=s.retired.filter(id=>id===s.panel?false:!bancoDeleteKnown_(id));
+    let count=0;
+    s.routines=s.routines.filter(r=>{
+      const id=r[0],age=now-r[1];
+      if (id===s.panel || (r[2]==='r' && id===latest)) return true;
+      if (age<86400000 || count>=12) return true;
+      if (age>=172800000) return false; // Telegram can no longer delete it.
+      count++;return !bancoDeleteKnown_(id);
+    });
+    bancoChatWrite_(s);
+  });
+}
+function bancoConfiguraManutenzione() {
+  const triggers=ScriptApp.getProjectTriggers().filter(t=>t.getHandlerFunction()==='bancoManutenzioneChat');
+  if (!triggers.length) ScriptApp.newTrigger('bancoManutenzioneChat').timeBased().everyMinutes(15).create();
+  console.log(JSON.stringify({ok:true,maintenance:'every_15_minutes',retention_hours:24,latest_reply_preserved:true}));
+}
+function bancoInvalidate_() {
+  const cache=CacheService.getScriptCache();
+  if (typeof cache.removeAll==='function') cache.removeAll(bancoBooks_().flatMap(b=>['Sisal Sport','PokerStars'].map(n=>'bn:'+BANCO_MENU_VERSION+':'+b.id+':'+n)));
 }

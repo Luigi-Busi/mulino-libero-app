@@ -4,7 +4,7 @@ Release indipendente del Mulino, versionata nello stesso repository sul ramo
 `ops/email-monitor`, con tag `email-monitor-vX.Y.Z`. L'applicazione Mugnaio
 mantiene il proprio ciclo di aggiornamento distinto (attualmente v1.3.2).
 
-La release corrente è `email-monitor-v1.2.1`, schema dati 1. Legge soltanto
+La release corrente è `email-monitor-v1.3.0`, schema dati 1. Legge soltanto
 Sisal Sport e PokerStars; Snai è disattivato nella configurazione privata.
 Usa i colori visualizzati delle celle email e password email: bianco, grigio,
 viola/fucsia ammessi; azzurro, rosso, rosso scuro e altri colori esclusi.
@@ -22,7 +22,7 @@ amministrativa e non vengono ripetuti automaticamente.
 ## Menu e dashboard del Banco
 
 Il codice Apps Script del progetto esistente Auto-Ricezione Dati integra il
-menu Banco 1.0.1. `/menu` apre i comandi; `/account` o `/stato` apre i file e i
+menu Banco 1.1.0. `/menu` apre i comandi; `/account` o `/stato` apre i file e i
 fogli Sisal Sport e PokerStars nell'ordine effettivo, con account ordinati per riga
 e otto per pagina. GoldBet, MyLotteries e Bet365 sono esclusi dalla dashboard;
 i loro comandi di acquisizione esistenti restano disponibili.
@@ -32,7 +32,7 @@ monitor, non una verifica diretta dello stato presso l'operatore.
 
 Username, password dell'account ed email si copiano con i pulsanti Telegram.
 La password è nascosta nel testo; la password email non ha un pulsante.
-Apri riga nel foglio apre la riga precisa. I dettagli vengono letti dal foglio
+I dettagli vengono letti dal foglio
 attuale e i pulsanti non rivelano credenziali di una riga spostata nel frattempo.
 Il menu è riservato all'amministratore nella propria chat privata. Inserimento,
 correzione entro 60 minuti, annullamento, test e ID conservano i controlli originali.
@@ -140,12 +140,12 @@ systemctl start mulino-system-backup.service
 ```
 
 Ripristina i file della release precedente mantenendo registro e configurazione.
-Il rollback dalla 1.2.1 alla 1.1.0 usa automaticamente il token Mugnaio originale:
+Il rollback dalla 1.3.0 alla 1.1.0 usa automaticamente il token Mugnaio originale:
 il vecchio launcher conserva il suo percorso e ignora le nuove opzioni Banco.
 La dashboard Banco resta consultabile con la data dell'ultima sincronizzazione.
-Per annullare anche il menu, selezionare la versione 28 dello stesso deployment
+Per annullare questo aggiornamento del menu, selezionare la versione 30 dello stesso deployment
 Apps Script; il suo indirizzo e il webhook Telegram restano invariati. Per
-riattivare la 1.2.1 dopo il rollback, usare deploy con il tag 1.2.1.
+riattivare la 1.3.0 dopo il rollback, usare deploy con il tag 1.3.0.
 Nella prima installazione non esiste una release precedente del monitor.
 Per disattivare questa prima release:
 
@@ -171,7 +171,7 @@ evita il controllo a ritroso durante i normali aggiornamenti e rollback.
 
 ## Collaudo
 
-104 test Python: selezione dei fogli, colori, mittenti e oggetti, IMAP readonly,
+113 test Python: selezione dei fogli, colori, mittenti e oggetti, IMAP readonly,
 inizializzazione senza storico, limiti orari e cambio ora, riavvii,
 duplicati, consegna Telegram, backup/ripristino, aggiornamento,
 rollback e recupero da interruzione. Esecuzione in Linux, Python 3.12:
@@ -180,5 +180,30 @@ rollback e recupero da interruzione. Esecuzione in Linux, Python 3.12:
 PYTHONPATH=ops/email-monitor:ops/recovery python3 -m unittest discover -s ops/email-monitor
 ```
 
-30 test del menu e dell'integrazione con i comandi esistenti, con dati fittizi:
+44 test del menu e dell'integrazione con i comandi esistenti, con dati fittizi:
 `node ops/email-monitor/banco/test_banco.cjs`.
+
+## Menu in fondo e pulizia dopo 24 ore
+
+Il Banco conserva un solo pannello registrato. Quando arrivano nuovi messaggi,
+il pannello viene ricreato in fondo e il precedente viene ritirato. La navigazione
+modifica il pannello corrente se è ancora in fondo. I pulsanti degli avvisi non
+trasformano l'avviso in un pannello da cancellare.
+
+Solo comandi amministratore e risposte ordinarie esplicitamente classificate
+entrano nella pulizia: le risposte precedenti vengono eliminate dopo 24 ore,
+conservando l'ultima. Un trigger Apps Script ogni 15 minuti esegue la pulizia anche
+senza interazioni. Notifiche di acquisizione, correzione, documenti, riattivazione
+ed errori sono conservate. Anche la vecchia eliminazione delle conferme dopo
+il terzo inserimento è stata rimossa. Sono registrati solo ID, categoria e ora;
+la snapshot del registro chat viene conservata nel database del monitor.
+
+Gli elenchi senza password vengono conservati per 45 secondi. Aggiorna forza
+una nuova lettura; le credenziali della scheda vengono lette dalla riga attuale.
+Il tasto Apri riga è stato rimosso dalla scheda account.
+
+Sisal riconosce entrambi i mittenti info@sisal.it e infoclienti@sisal.it, sia
+per documenti sia per riattivazioni. L'importazione storica è un intervento
+una tantum riservato alle due caselle segnalate, con metadati verificati;
+non sposta i cursori del controllo ordinario. Le notifiche importate passano
+per il normale registro di consegna, aprendo l'attesa dal mattino successivo.

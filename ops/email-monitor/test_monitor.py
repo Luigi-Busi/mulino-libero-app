@@ -388,4 +388,46 @@ class DashboardMirrorTest(unittest.TestCase):
    result=m.run_cycle(cfg,self.state,source=source,scanner=scanner,sleep=lambda _:None)
   self.assertEqual(result['status'],'degraded');self.assertNotIn('TEST_SECRET',json.dumps(result))
 
+class BancoUpgradeTest(unittest.TestCase):
+ def setUp(self):
+  self.temp=tempfile.TemporaryDirectory();self.state=m.State(Path(self.temp.name)/'state.sqlite3');self.state.sync([ACCOUNT])
+ def tearDown(self):self.state.db.close();self.temp.cleanup()
+ def test_both_sisal_senders_accepted_for_requests(self):
+  for i,sender in enumerate(['info@sisal.it','infoclienti@sisal.it']):self.assertTrue(self.state.enqueue(ACCOUNT.email,'sisal',raw(sender=sender,mid=f'<doc{i}>'),'27-Sep-2026 18:48:40 +0200'))
+ def test_new_sender_accepted_for_reactivation(self):
+  self.state.enqueue(ACCOUNT.email,'sisal',raw(),'27-Sep-2026 18:48:40 +0200');event=self.state.db.execute('SELECT * FROM events').fetchone();self.state.start_followup(event,'2026-10-03T03:00:00+00:00');watch=self.state.db.execute('SELECT * FROM followups').fetchone()
+  self.assertTrue(self.state.enqueue_followup(watch,raw(sender='infoclienti@sisal.it',subject="Il tuo account e' stato riattivato",mid='<react>'),'04-Oct-2026 08:30:00 +0200'))
+ def test_similar_or_other_operator_senders_rejected(self):
+  self.assertFalse(m.allowed_sender('sisal','infoclienti@sisal.it.example.org'));self.assertFalse(m.allowed_sender('pokerstars','infoclienti@sisal.it'))
+ def record(self):return {'email':ACCOUNT.email,'operator':'sisal','subject':"Inviaci la copia del tuo documento d'identità",'received':'27-Sep-2026 18:48:40 +0200','sender':'infoclienti@sisal.it'}
+ def test_one_time_import_is_idempotent_and_preserves_cursors(self):
+  with self.state.db:self.state.advance(ACCOUNT.email,'sisal','INBOX',1,1,42)
+  before=list(self.state.db.execute('SELECT * FROM cursors'))
+  first=m.import_confirmed_requests(self.state,[self.record()],'2026-10-03T03:00:00+00:00');second=m.import_confirmed_requests(self.state,[self.record()],'2026-10-03T03:01:00+00:00')
+  self.assertEqual(first,second);self.assertEqual(self.state.db.execute('SELECT COUNT(*) FROM events').fetchone()[0],1);self.assertEqual(list(self.state.db.execute('SELECT * FROM cursors')),before)
+ def test_import_delivery_opens_next_morning_watch(self):
+  m.import_confirmed_requests(self.state,[self.record()],'2026-10-03T03:00:00+00:00');sender=Mock();sender.send.return_value=('sent',55,0,None)
+  with patch.object(m,'now',return_value='2026-10-03T03:00:00+00:00'):m.deliver(self.state,[ACCOUNT],sender)
+  self.assertEqual(self.state.db.execute('SELECT not_before FROM followups').fetchone()[0],'2026-10-04T06:00:00+00:00');m.deliver(self.state,[ACCOUNT],sender);sender.send.assert_called_once()
+ def test_import_rejects_mismatched_sender_or_inactive_account(self):
+  bad={**self.record(),'sender':'other@example.org'}
+  with self.assertRaises(ValueError):m.import_confirmed_requests(self.state,[bad],m.now())
+  self.state.sync([])
+  with self.assertRaises(ValueError):m.import_confirmed_requests(self.state,[self.record()],m.now())
+ def test_menu_bridge_failure_never_marks_delivery_uncertain(self):
+  sender=object.__new__(m.Telegram);sender.token='TEST';sender.chat=1;sender.session=Mock();sender.dashboard_target={'webhook_file':'missing'}
+  response=sender.session.post.return_value;response.status_code=200;response.json.return_value={'ok':True,'result':{'message_id':55}}
+  self.assertEqual(sender.send('test'),('sent',55,0,None))
+ def test_menu_bridge_only_receives_message_id(self):
+  bridge=Path(self.temp.name)/'bridge.json';bridge.write_text(json.dumps({'url':'https://test.invalid'}));sender=object.__new__(m.Telegram);sender.dashboard_target={'webhook_file':str(bridge)}
+  response=Mock();response.status_code=200;response.json.return_value={'ok':True}
+  with patch('requests.post',return_value=response) as post:sender.restore_panel(55)
+  self.assertEqual(post.call_args.kwargs['json'],{'banco_notice_message':55})
+ def test_chat_snapshot_is_saved_without_credentials(self):
+  cfg=MirrorTest.bridge(self) if False else None
+  path=Path(self.temp.name)/'bridge.json';path.write_text(json.dumps({'url':'https://test.invalid'}));rows=m.mirror_rows(self.state,'');digest=m.hashlib.sha256(json.dumps(rows,separators=(',',':'),ensure_ascii=False).encode()).hexdigest()
+  response=Mock();response.status_code=200;response.json.return_value={'ok':True,'digest':digest,'chat_state':{'panel':55,'routines':[],'retired':[],'last':55}}
+  with patch('requests.post',return_value=response):m.publish_dashboard({'dashboard_status':{'webhook_file':str(path)}},self.state)
+  snap=self.state.db.execute("SELECT value FROM settings WHERE key='banco_chat_snapshot'").fetchone()[0];self.assertIn('55',snap);self.assertNotIn('password',snap)
+
 if __name__=='__main__':unittest.main(verbosity=2)

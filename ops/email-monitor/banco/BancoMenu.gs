@@ -1,5 +1,5 @@
 // Il Banco: private account dashboard. No credentials in logs/cache/callback_data.
-const BANCO_MENU_VERSION = '1.0.1';
+const BANCO_MENU_VERSION = '1.1.0';
 const BANCO_STATUS_TAB = 'Stato Account Banco';
 const BANCO_PAGE_SIZE = 8;
 const BANCO_COLORS = ['#ffffff','#ff00ff','#9900ff','#d9d2e9','#b4a7d6','#8e7cc3','#674ea7','#351c75','#20124d'];
@@ -40,7 +40,7 @@ function bancoRiceviStati_(rows) {
     sheet.getRange(1,1,total,8).setNumberFormat('@').setValues(payload);
     SpreadsheetApp.flush();
     const digest=Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256,JSON.stringify(rows),Utilities.Charset.UTF_8).map(v=>('0'+((v+256)%256).toString(16)).slice(-2)).join('');
-    return ContentService.createTextOutput(JSON.stringify({ok:true,rows:rows.length,digest:digest,version:BANCO_MENU_VERSION})).setMimeType(ContentService.MimeType.JSON);
+    return ContentService.createTextOutput(JSON.stringify({ok:true,rows:rows.length,digest:digest,version:BANCO_MENU_VERSION,chat_state:bancoChatRead_()})).setMimeType(ContentService.MimeType.JSON);
   } finally {lock.releaseLock();}
 }
 
@@ -67,28 +67,28 @@ function bancoPrivateAdmin_(actor, chat) {
     String(actor.id) === String(ADMIN_TELEGRAM_ID) && String(chat.id) === String(ADMIN_TELEGRAM_ID);
 }
 
-function bancoRender_(chat, message, view) {
-  const data = {chat_id: String(chat.id), text: view.text.slice(0,3900),
-    reply_markup: {inline_keyboard: view.buttons}, link_preview_options: {is_disabled:true}};
-  if (message) {data.message_id = message; return bancoApi_('editMessageText', data);}
-  return bancoApi_('sendMessage', data);
-}
+function bancoRender_(chat,message,view) {return bancoPanelRender_(chat,message,view);}
 
 function bancoGestisciUpdate(update) {
   const callback = update.callback_query;
   const message = callback ? callback.message : update.message;
   const text = String(message && message.text || '').trim();
   const command = text.split(/\s/)[0].split('@')[0].toLowerCase();
-  const data = callback ? String(callback.data || '') : '';
+  let data = callback ? String(callback.data || '') : '';
+  bancoForceRefresh_=data.indexOf('bn:r:')===0;
+  if (bancoForceRefresh_) data=data.replace('bn:r:','bn:');
   const recognized = callback ? data.indexOf('bn:') === 0 : ['/start','/menu','/account','/stato','/help'].indexOf(command) !== -1;
-  if (!recognized) return false;
-  const actor = callback ? callback.from : message.from;
+
+  const actor = callback ? callback.from : message && message.from;
   const chat = message && message.chat;
   if (!bancoPrivateAdmin_(actor,chat)) {
+    if (!recognized) return false;
     if (callback) bancoApi_('answerCallbackQuery',{callback_query_id:callback.id,text:'Menu riservato alla chat privata dell’amministratore.',show_alert:true});
     else if (chat) bancoApi_('sendMessage',{chat_id:chat.id,text:'Menu riservato alla chat privata dell’amministratore.'});
     return true;
   }
+  bancoObserve_(message,callback && /^bn:cmd:/.test(data)?'/'+data.split(':')[2]:command,callback);
+  if (!recognized) return false;
   if (callback) bancoApi_('answerCallbackQuery',{callback_query_id:callback.id});
   // Existing commands continue through the original authorization/correction code.
   if (callback && /^bn:cmd:(correggi|annulla|test|id)$/.test(data)) {
@@ -133,6 +133,7 @@ function bancoBooks_() {
   return ['SPREADSHEET_ID'].map((key,index)=>({key:key,index:index,id:props.getProperty(key)})).filter(b=>!!b.id);
 }
 function bancoSheets_() {
+  if (bancoSheetRefs_) return bancoSheetRefs_;
   const result=[];
   bancoBooks_().forEach(b=>{
     const book=SpreadsheetApp.openById(b.id);
@@ -141,7 +142,7 @@ function bancoSheets_() {
       if (cfg && ['Sisal Sport','PokerStars'].indexOf(sheet.getName())!==-1) result.push({book:b.id,bookIndex:b.index,bookTitle:book.getName(),sheet:sheet,gid:sheet.getSheetId(),name:sheet.getName()});
     });
   });
-  return result;
+  bancoSheetRefs_=result;return result;
 }
 function bancoFindSheet_(bi,gid) {
   const item=bancoSheets_().find(s=>s.bookIndex===bi && s.gid===gid);
@@ -162,23 +163,32 @@ function bancoFingerprint_(a) {
   const raw=[a.name,a.username,a.email,a.stable].join('\n');
   return Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256,raw,Utilities.Charset.UTF_8).map(v=>('0'+((v+256)%256).toString(16)).slice(-2)).join('').slice(0,12);
 }
-function bancoAccounts_(item,withPassword) {
-  const sheet=item.sheet;const last=sheet.getLastRow();
-  if (!last || last>10000) throw new Error('Dimensioni foglio non riconosciute');
+function bancoAccounts_(item,withPassword,rowNumber) {
+  const sheet=item.sheet,cache=CacheService.getScriptCache(),key='bn:'+BANCO_MENU_VERSION+':'+item.book+':'+item.name;
+  if (!withPassword && !bancoForceRefresh_) {
+    try {const hit=cache.get(key);if (hit) return JSON.parse(hit);} catch (_) {}
+  }
+  const last=sheet.getLastRow();if (!last || last>10000) throw new Error('Dimensioni foglio non riconosciute');
   const width=Math.min(sheet.getLastColumn(),26);
-  const values=sheet.getRange(1,1,last,width).getDisplayValues();const headers=bancoHeaders_(values);
-  const colors=sheet.getRange(1,1,last,width).getBackgrounds();
-  const result=[];
-  for (let i=headers.row+1;i<values.length;i++) {
-    const row=values[i];const get=n=>n>=0?String(row[n]||'').trim():'';
+  const headerValues=sheet.getRange(1,1,rowNumber?Math.min(last,30):last,width).getDisplayValues();
+  const headers=bancoHeaders_(headerValues);
+  if (rowNumber && (rowNumber<=headers.row+1 || rowNumber>last)) return [];
+  const start=rowNumber||1;
+  const values=rowNumber?sheet.getRange(rowNumber,1,1,width).getDisplayValues():headerValues;
+  const colors=sheet.getRange(start,1,values.length,width).getBackgrounds();const result=[];
+  for (let i=0;i<values.length;i++) {
+    const physical=start+i;if (physical<=headers.row+1) continue;
+    const row=values[i],get=n=>n>=0?String(row[n]||'').trim():'';
     const name=get(headers.name),username=get(headers.username),email=get(headers.email);
     if (!name || (!username && !email && !get(headers.password))) continue;
-    const a={row:i+1,name:name,username:username,email:email,stable:get(headers.stable),emailColor:headers.email>=0?colors[i][headers.email].toLowerCase():'unknown',mailPasswordColor:headers.mailPassword>=0?colors[i][headers.mailPassword].toLowerCase():'unknown',hasMailPassword:!!get(headers.mailPassword)};
+    const a={row:physical,name:name,username:username,email:email,stable:get(headers.stable),emailColor:headers.email>=0?colors[i][headers.email].toLowerCase():'unknown',mailPasswordColor:headers.mailPassword>=0?colors[i][headers.mailPassword].toLowerCase():'unknown',hasMailPassword:!!get(headers.mailPassword)};
     if (withPassword) a.password=get(headers.password);
     a.fingerprint=bancoFingerprint_(a);result.push(a);
   }
+  if (!withPassword) {try {const raw=JSON.stringify(result);if (raw.length<80000) cache.put(key,raw,45);} catch (_) {}}
   return result;
 }
+
 function bancoMirror_() {
   const id=PropertiesService.getScriptProperties().getProperty('SPREADSHEET_ID_LOG_MAIL');
   const data={states:{},updated:'',available:false};
@@ -224,7 +234,7 @@ function bancoRoot_() {
     buttons.push([bancoButton_('Apri '+item.name,'bn:s:'+item.bookIndex+':'+item.gid+':0')]);
   });
   text+='🟢 Attivo · 🟠 Richiesta documenti · ✅ Riattivato\n⚪ Non monitorato · 🔵 In attesa di controllo\n\nUltimo controllo: '+bancoDate_(mirror.updated);
-  buttons.push([bancoButton_('🔄 Aggiorna','bn:root'),bancoButton_('🏠 Menu','bn:menu')]);
+  buttons.push([bancoButton_('🔄 Aggiorna','bn:r:root'),bancoButton_('🏠 Menu','bn:menu')]);
   return {text:text,buttons:buttons};
 }
 function bancoSheet_(bi,gid,requestedPage) {
@@ -238,11 +248,11 @@ function bancoSheet_(bi,gid,requestedPage) {
   if (page>0) nav.push(bancoButton_('◀️ Indietro','bn:s:'+bi+':'+gid+':'+(page-1)));
   if (page+1<pages) nav.push(bancoButton_('Avanti ▶️','bn:s:'+bi+':'+gid+':'+(page+1)));
   if (nav.length) buttons.push(nav);
-  buttons.push([bancoButton_('🔄 Aggiorna','bn:s:'+bi+':'+gid+':'+page),bancoButton_('📂 Fogli','bn:root')]);
+  buttons.push([bancoButton_('🔄 Aggiorna','bn:r:s:'+bi+':'+gid+':'+page),bancoButton_('📂 Fogli','bn:root')]);
   return {text:text,buttons:buttons};
 }
 function bancoAccount_(bi,gid,row,fingerprint,page) {
-  const item=bancoFindSheet_(bi,gid),account=bancoAccounts_(item,true).find(a=>a.row===row);
+  const item=bancoFindSheet_(bi,gid),account=bancoAccounts_(item,true,row).find(a=>a.row===row);
   const back='bn:s:'+bi+':'+gid+':'+page;
   if (!account || account.fingerprint!==fingerprint) return {text:'La riga dell’account è cambiata. Apri di nuovo l’elenco per consultare i dati aggiornati.',buttons:[[bancoButton_('📋 Torna agli account',back)]]};
   const mirror=bancoMirror_(),state=bancoState_(item,account,mirror);
@@ -255,7 +265,6 @@ function bancoAccount_(bi,gid,row,fingerprint,page) {
     if (pair[1] && Array.from(pair[1]).length<=256) copy.push({text:pair[0],copy_text:{text:pair[1]}});
   });
   if (copy.length) buttons.push(copy);
-  buttons.push([{text:'📄 Apri riga nel foglio',url:'https://docs.google.com/spreadsheets/d/'+item.book+'/edit#gid='+gid+'&range=A'+row+':Z'+row}]);
-  buttons.push([bancoButton_('🔄 Aggiorna','bn:a:'+bi+':'+gid+':'+row+':'+fingerprint+':'+page),bancoButton_('↩️ Account',back)]);
+  buttons.push([bancoButton_('🔄 Aggiorna','bn:r:a:'+bi+':'+gid+':'+row+':'+fingerprint+':'+page),bancoButton_('↩️ Account',back)]);
   return {text:text,buttons:buttons};
 }

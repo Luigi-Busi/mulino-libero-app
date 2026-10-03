@@ -24,7 +24,7 @@ import time
 import unicodedata
 from zoneinfo import ZoneInfo
 
-VERSION = '1.2.1'
+VERSION = '1.3.0'
 RULES = {
  'sisal': ('info@sisal.it', "inviaci la copia del tuo documento d'identità"),
  'pokerstars': ('info@clienti.pokerstars.it', "inviaci il tuo documento d'identità"),
@@ -44,6 +44,24 @@ def within_hours(config, instant=None):
 def normalized(value):
  value = unicodedata.normalize('NFC', str(value)).casefold()
  return ' '.join(value.translate(str.maketrans({'’':"'",'‘':"'",'ʼ':"'",'`':"'"})).split())
+
+def allowed_sender(operator,address):
+ allowed={RULES[operator][0]}
+ if operator=='sisal':allowed.add('infoclienti@sisal.it')
+ return address.strip().casefold() in allowed
+
+def import_confirmed_requests(state,records,stamp):
+ """One-time, audited metadata import; never changes ordinary IMAP cursors."""
+ keys=[]
+ with state.db:
+  for record in records:
+   email=record['email'].strip().lower();operator=record['operator'];subject=record['subject'];received=record['received']
+   if not EMAIL_RE.fullmatch(email) or not allowed_sender(operator,record['sender']) or normalized(RULES[operator][1]) not in normalized(subject):raise ValueError('Audited request does not match rules')
+   received_time(received)
+   if not state.db.execute('SELECT 1 FROM subscriptions WHERE email=? AND operator=? AND active=1',(email,operator)).fetchone():raise ValueError('Audited account no longer monitored')
+   key=hashlib.sha256(('one-time-confirmed\n'+email+'\n'+operator+'\n'+received+'\n'+normalized(subject)).encode()).hexdigest()
+   state.db.execute('INSERT OR IGNORE INTO events(event_key,email,operator,subject,received,created,updated) VALUES(?,?,?,?,?,?,?)',(key,email,operator,subject[:1000],received,stamp,stamp));keys.append(key)
+ return keys
 
 def received_time(value):
  return datetime.strptime(value,'%d-%b-%Y %H:%M:%S %z').astimezone(timezone.utc)
@@ -204,7 +222,7 @@ class State:
   addresses=getaddresses([str(h) for h in message.get_all('From',[])])
   if len(addresses)!=1:return False
   sender,phrase=RULES[operator]
-  if addresses[0][1].strip().casefold()!=sender or normalized(phrase) not in normalized(subject):return False
+  if not allowed_sender(operator,addresses[0][1]) or normalized(phrase) not in normalized(subject):return False
   mid=str(message.get('Message-ID','')).strip()
   fingerprint=mid if mid else hashlib.sha256(raw+received.encode()).hexdigest()
   key=hashlib.sha256((email+'\n'+operator+'\n'+fingerprint).encode()).hexdigest()
@@ -234,7 +252,7 @@ class State:
  def enqueue_followup(self,watch,raw,received):
   message=BytesHeaderParser(policy=policy.default).parsebytes(raw)
   addresses=getaddresses([str(h) for h in message.get_all('From',[])])
-  if len(addresses)!=1 or addresses[0][1].strip().casefold()!=RULES[watch['operator']][0]:return False
+  if len(addresses)!=1 or not allowed_sender(watch['operator'],addresses[0][1]):return False
   subject=str(message.get('Subject',''))
   if not is_reactivation(subject) or received_time(received)<datetime.fromisoformat(watch['request_received']):return False
   mid=str(message.get('Message-ID','')).strip()
@@ -392,7 +410,7 @@ def notification(event,accounts,reactivation=False):
 class Telegram:
  def __init__(self,config):
   import requests
-  self.session=requests.Session();self.token=Path(config['telegram_token_file']).read_text().strip();self.chat=config['telegram_chat_id'];self.dashboard_button=bool(config.get('dashboard_status'))
+  self.session=requests.Session();self.token=Path(config['telegram_token_file']).read_text().strip();self.chat=config['telegram_chat_id'];self.dashboard_button=bool(config.get('dashboard_status'));self.dashboard_target=config.get('dashboard_status',{})
  def send(self,text):
   # No requests logging / raise_for_status: URLs contain the secret token.
   try:
@@ -402,10 +420,23 @@ class Telegram:
   except Exception:return ('uncertain',None,0,'NETWORK_UNCERTAIN')
   try:body=response.json()
   except ValueError:return ('uncertain',None,0,'RESPONSE_UNCERTAIN')
-  if response.status_code==200 and body.get('ok') and isinstance(body.get('result',{}).get('message_id'),int):return ('sent',body['result']['message_id'],0,None)
+  if response.status_code==200 and body.get('ok') and isinstance(body.get('result',{}).get('message_id'),int):
+   mid=body['result']['message_id'];self.restore_panel(mid);return ('sent',mid,0,None)
   if response.status_code==429 and body.get('error_code')==429:return ('pending',None,int(body.get('parameters',{}).get('retry_after',60))+5,'RATE_LIMIT')
   if response.status_code in [400,401,403]:return ('failed',None,0,'TELEGRAM_REJECTED')
   return ('uncertain',None,0,'RESPONSE_UNCERTAIN')
+
+ def restore_panel(self,message_id):
+  target=getattr(self,'dashboard_target',{})
+  if not target.get('webhook_file'):return
+  try:
+   import requests
+   bridge=json.loads(Path(target['webhook_file']).read_text())
+   result=requests.post(bridge['url'],json={'banco_notice_message':message_id},timeout=(5,15))
+   if result.status_code!=200 or result.json().get('ok') is not True:raise RuntimeError('Panel update not confirmed')
+  except Exception:
+   # Delivery was already confirmed; UI housekeeping must never trigger a resend.
+   print(json.dumps({'phase':'banco_menu','status':'retry_on_next_interaction'}))
 
 def deliver(state,accounts,sender,reactivation=False):
  table='followup_events' if reactivation else 'events'
@@ -470,6 +501,10 @@ def publish_dashboard(config,state,client=None):
   answer=response.json()
   digest=hashlib.sha256(json.dumps(rows,separators=(',',':'),ensure_ascii=False).encode()).hexdigest()
   if response.status_code!=200 or answer.get('ok') is not True or answer.get('digest')!=digest:raise RuntimeError('Dashboard sync not confirmed')
+  if isinstance(state,State) and isinstance(answer.get('chat_state'),dict):
+   snapshot=json.dumps({'saved_at':now(),'state':answer['chat_state']},separators=(',',':'))
+   if len(snapshot)>8192:raise ValueError('Banco chat snapshot exceeds limit')
+   with state.db:state.db.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('banco_chat_snapshot',?)",(snapshot,))
   return
  if client is None:
   import gspread
