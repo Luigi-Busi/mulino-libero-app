@@ -2321,6 +2321,7 @@ class Coordinator:
         self.processing_task: Optional[asyncio.Task[None]] = None
         self._claim_lock = asyncio.Lock()
         self.recovery_buttons: dict[str, dict[str, Any]] = {}
+        self.recovery_lock = asyncio.Lock()
         self.consistency_task: Optional[asyncio.Task] = None
         self.consistency_report: Optional[dict] = None
         self.resend_event = asyncio.Event()
@@ -2337,6 +2338,8 @@ class Coordinator:
         self.tester_change_reason = "manual"
         self.messages = MessageCleanup(getattr(settings, "data_dir", None))
         self.outcomes = CreatedOutcomes(getattr(settings, "data_dir", None))
+        self.outcomes.db.execute("""CREATE TABLE IF NOT EXISTS recovery_ignored (
+            request_id TEXT PRIMARY KEY, signature TEXT NOT NULL)""")
         self.paused = self.outcomes.queue_paused()
         self.pause_persisted = True
         self.created_in_memory: dict[str, Any] = {}
@@ -3614,7 +3617,7 @@ def recovery_signature(request: QueueRequest) -> tuple:
 
 
 def recovery_token(coordinator: Coordinator, request: QueueRequest, action: str,
-                   *, email: str = "") -> str:
+                   *, email: str = "", batch: str = "") -> str:
     now = time.monotonic()
     coordinator.recovery_buttons = {
         k: v for k, v in coordinator.recovery_buttons.items() if now - v["created"] < 600
@@ -3625,8 +3628,41 @@ def recovery_token(coordinator: Coordinator, request: QueueRequest, action: str,
     coordinator.recovery_buttons[token] = {
         "created": now, "signature": recovery_signature(request),
         "request_id": request.request_id, "action": action, "email": email,
+        "batch": batch,
     }
     return token
+
+
+def recovery_ignored(coordinator: Coordinator, request: QueueRequest) -> bool:
+    row = coordinator.outcomes.db.execute(
+        'SELECT signature FROM recovery_ignored WHERE request_id=?', (request.request_id,)).fetchone()
+    signature = hashlib.sha256(json.dumps(recovery_signature(request)).encode()).hexdigest()
+    return bool(row and row[0] == signature)
+
+
+async def recovery_reply(coordinator: Coordinator, source: Any, text: str, *,
+                         batch: str, kind: str = "list", **kwargs: Any) -> Any:
+    sent = await source.reply_text(text, **kwargs)
+    try:
+        if sent.chat.id == coordinator.settings.admin_id:
+            coordinator.panel.cleanup.track_recovery(coordinator.bot.id, sent.message_id, batch, kind)
+    except (sqlite3.Error, ValueError):
+        LOGGER.warning("Messaggio recupero inviato; pulizia non registrata")
+    return sent
+
+
+async def finish_recovery(coordinator: Coordinator, batch: str, *, message: Any = None) -> None:
+    if not batch:
+        return
+    try:
+        coordinator.panel.cleanup.finish_recovery(coordinator.bot.id, batch, message=message)
+    except (sqlite3.Error, ValueError):
+        LOGGER.warning("Operazione recupero completata; pulizia rinviata")
+    if message is None:
+        coordinator.recovery_buttons = {k:v for k,v in coordinator.recovery_buttons.items()
+                                        if v.get("batch") != batch}
+    await coordinator.panel.cleanup.drain(coordinator.bot,
+                                        lambda: coordinator.panel.message_id(coordinator.bot.id))
 
 
 async def recovery_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3636,12 +3672,17 @@ async def recovery_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             or update.effective_chat.type != ChatType.PRIVATE):
         return
     try:
-        page_number = int(context.args[0]) if context.args else 1
-        if page_number < 1 or len(context.args) > 1:
+        ignored_view = bool(context.args and context.args[0].lower() == "ignorate")
+        args = context.args[1:] if ignored_view else context.args
+        page_number = int(args[0]) if args else 1
+        if page_number < 1 or len(args) > 1:
             raise ValueError()
     except ValueError:
-        await update.effective_message.reply_text("Uso: /recupera oppure /recupera 2 per la seconda pagina.")
+        await recovery_reply(coordinator, update.effective_message,
+            "Uso: /recupera oppure /recupera 2 per la seconda pagina.\n"
+            "Richieste ignorate: /recupera ignorate.", batch=secrets.token_hex(8), kind="usage")
         return
+    batch = secrets.token_hex(8)
     try:
         requests = await asyncio.to_thread(coordinator.store._read_requests)
         recorded = coordinator.outcomes.ids() | set(coordinator.created_in_memory)
@@ -3654,44 +3695,64 @@ async def recovery_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                     requests.append(outcome[0])
         requests = [r for r in requests if r.status in ({"ERRORE", "ANNULLATA"} | TRANSIENT_STATUSES)
                     or r.request_id in pending]
+        def hidden(r):
+            return (r.status in {"ERRORE", "ANNULLATA"} and r.request_id not in recorded
+                    and not (coordinator.active and coordinator.active.request_id == r.request_id)
+                    and recovery_ignored(coordinator, r))
+        requests = [r for r in requests if hidden(r) == ignored_view]
         requests.sort(key=lambda r: r.row, reverse=True)
         start = (page_number - 1) * 5
         selected = requests[start:start + 5]
         if not selected:
             await update.effective_message.reply_text("Nessuna richiesta da recuperare in questa pagina.")
             return
-        await update.effective_message.reply_text(
+        await recovery_reply(coordinator, update.effective_message,
             coordinator.queue_status_text() + "\n"
-            + f"Recupero richieste — pagina {page_number}/{(len(requests) + 4) // 5}\n"
-            "I pulsanti scadono dopo 10 minuti. Per aggiornare usa /recupera."
+            + ("Richieste ignorate" if ignored_view else "Recupero richieste")
+            + f" — pagina {page_number}/{(len(requests) + 4) // 5}\n"
+            "I pulsanti scadono dopo 10 minuti. Per aggiornare usa /recupera.\n"
+            "Per rivedere le richieste nascoste: /recupera ignorate.", batch=batch
         )
         for request in selected:
             text = (f"{request.destination_sheet} — riga {request.destination_row}\n"
                     f"{request.full_name}\nID: {request.request_id}\nStato: {request.status}")
             buttons = []
-            if coordinator.active and coordinator.active.request_id == request.request_id:
+            if ignored_view:
+                token = recovery_token(coordinator, request, "restore", batch=batch)
+                buttons.append([InlineKeyboardButton("↩️ Rimetti nel recupero", callback_data=f"rec:restore:{token}")])
+            elif coordinator.active and coordinator.active.request_id == request.request_id:
                 text += "\nRichiesta ancora attiva: se bloccata, usa /annulla e attendi la chiusura, poi /recupera."
             elif request.request_id in recorded:
                 text += "\nLa casella risulta gia creata: e disponibile solo il salvataggio su Sheets."
-                token = recovery_token(coordinator, request, "sync")
+                token = recovery_token(coordinator, request, "sync", batch=batch)
                 buttons.append([InlineKeyboardButton("💾 Riprova salvataggio", callback_data=f"rec:sync:{token}")])
             else:
-                token = recovery_token(coordinator, request, "retry")
+                token = recovery_token(coordinator, request, "retry", batch=batch)
                 buttons.append([InlineKeyboardButton("🔄 Riprova registrazione", callback_data=f"rec:retry:{token}")])
                 if request.status in {"ERRORE", "ANNULLATA"}:
-                    token = recovery_token(coordinator, request, "created")
+                    token = recovery_token(coordinator, request, "created", batch=batch)
                     buttons.append([InlineKeyboardButton("✅ Casella gia creata", callback_data=f"rec:created:{token}")])
-            await update.effective_message.reply_text(
-                text, reply_markup=InlineKeyboardMarkup(buttons) if buttons else None
+                    token = recovery_token(coordinator, request, "ignore", batch=batch)
+                    buttons.append([InlineKeyboardButton("🙈 Ignora richiesta", callback_data=f"rec:ignore:{token}")])
+            await recovery_reply(coordinator, update.effective_message,
+                text, batch=batch, reply_markup=InlineKeyboardMarkup(buttons) if buttons else None
             )
         if start + 5 < len(requests):
-            await update.effective_message.reply_text(f"Altre richieste: /recupera {page_number + 1}")
+            command = "/recupera ignorate" if ignored_view else "/recupera"
+            await recovery_reply(coordinator, update.effective_message,
+                f"Altre richieste: {command} {page_number + 1}", batch=batch)
     except Exception as exc:
         LOGGER.warning("Elenco recupero non disponibile (%s)", type(exc).__name__)
         await update.effective_message.reply_text("Non riesco a leggere la coda. Nessuna modifica: riprova /recupera tra poco.")
 
 
 async def recovery_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    coordinator: Coordinator = context.application.bot_data["coordinator"]
+    async with coordinator.recovery_lock:
+        await recovery_callback_locked(update, context)
+
+
+async def recovery_callback_locked(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     coordinator: Coordinator = context.application.bot_data["coordinator"]
     query = update.callback_query
     if (not query or not query.from_user or not query.message
@@ -3742,18 +3803,44 @@ async def recovery_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             return
         if action == "sync":
             raise RegistrationError("Esito locale non trovato: nessuna registrazione avviata. Usa /recupera.")
+        hidden = recovery_ignored(coordinator, request)
+        if action == "restore":
+            if not hidden:
+                raise RegistrationError("La richiesta non e piu ignorata. Aggiorna con /recupera.")
+            coordinator.outcomes.db.execute('DELETE FROM recovery_ignored WHERE request_id=?', (request.request_id,))
+            await finish_recovery(coordinator, item.get("batch", ""), message=query.message.message_id)
+            await query.message.reply_text("↩️ Richiesta di nuovo visibile con /recupera. Non e stata riavviata.")
+            return
+        if hidden:
+            raise RegistrationError("Richiesta ignorata: ripristinala con /recupera ignorate.")
+        if action == "ignore":
+            if request.status not in {"ERRORE", "ANNULLATA"}:
+                raise RegistrationError("Puoi ignorare solo richieste fallite o annullate, non quelle in lavorazione.")
+            signature = hashlib.sha256(json.dumps(recovery_signature(request)).encode()).hexdigest()
+            coordinator.outcomes.db.execute('INSERT OR REPLACE INTO recovery_ignored VALUES (?,?)',
+                                           (request.request_id, signature))
+            coordinator.recovery_buttons = {k:v for k,v in coordinator.recovery_buttons.items()
+                                            if v["request_id"] != request.request_id}
+            await finish_recovery(coordinator, item.get("batch", ""), message=query.message.message_id)
+            await query.message.reply_text("🙈 Richiesta nascosta dal recupero. Riga e storico conservati. "
+                                           "Per ripristinarla usa /recupera ignorate.")
+            return
         if request.status not in ({"ERRORE", "ANNULLATA"} | TRANSIENT_STATUSES):
             raise RegistrationError("Richiesta non recuperabile in questo stato. Usa /recupera.")
         if action == "retry":
-            token = recovery_token(coordinator, request, "retry_yes")
-            await query.message.reply_text(
+            batch = item.get("batch", "") or secrets.token_hex(8)
+            token = recovery_token(coordinator, request, "retry_yes", batch=batch)
+            await recovery_reply(coordinator, query.message,
                 f"Riprovare {request.destination_sheet}, riga {request.destination_row}?\n"
                 "La registrazione ripartira dall'inizio. Conferma solo se NON hai gia creato la casella "
                 "con questo tentativo. In caso di dubbio verifica prima l'accesso alla mail.",
+                batch=batch, kind="confirm",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(
                     "Confermo: riprova", callback_data=f"rec:retry_yes:{token}")]]))
         elif action == "retry_yes":
             result = await asyncio.to_thread(coordinator.store.retry, request.request_id)
+            if result:
+                await finish_recovery(coordinator, item.get("batch", ""))
             await query.message.reply_text(("✅ Richiesta rimessa in coda."
                 + (" La coda e in pausa: partira dopo /riprendi." if coordinator.paused else "")) if result else
                 "Stato cambiato: richiesta non riavviata. Usa /recupera.")

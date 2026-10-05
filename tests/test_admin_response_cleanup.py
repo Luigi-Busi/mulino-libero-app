@@ -34,17 +34,17 @@ class ResponseAgeTests(unittest.IsolatedAsyncioTestCase):
     def recorded(self):
         return [r[0] for r in self.db.execute('SELECT message FROM admin_response_history ORDER BY message')]
 
-    async def test_exact_24_hour_threshold_keeps_latest_and_younger_replies(self):
-        self.response(40, 86400)
-        self.response(41, 86399)
+    async def test_exact_12_hour_threshold_keeps_latest_and_younger_replies(self):
+        self.response(40, 43200)
+        self.response(41, 43199)
         self.response(42, 0)
         await self.cleanup.drain(self.bot, None)
         self.assertEqual([c.kwargs['message_id'] for c in self.bot.delete_message.call_args_list], [40])
         self.assertEqual(self.recorded(), [41, 42])
 
-    async def test_background_pass_without_new_command_keeps_only_latest_after_day(self):
+    async def test_background_pass_without_new_command_keeps_only_latest_after_half_day(self):
         self.response(40, 0); self.response(41, 0); self.response(42, 0)
-        with patch('telegram_panel.time.time', return_value=NOW+86400):
+        with patch('telegram_panel.time.time', return_value=NOW+43200):
             await self.cleanup.drain(self.bot, None)
         self.assertEqual([c.kwargs['message_id'] for c in self.bot.delete_message.call_args_list], [40, 41])
         self.assertEqual(self.recorded(), [42])

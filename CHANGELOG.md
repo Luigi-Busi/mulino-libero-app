@@ -1,3 +1,17 @@
+## v1.3.4 — pulizia a 12 ore e gestione del recupero
+
+- Le risposte ordinarie della coda si eliminano dopo 12 ore, conservando sempre l'ultima e proteggendo gli avvisi.
+- L'avviso d'uso di /recupera si elimina dopo 30 minuti, anche dopo riavvio o ripristino.
+- Un nuovo tentativo confermato e accettato chiude solo il relativo elenco e le conferme di riprova; la conferma di casella gia creata conserva l'elenco. Esiti e errori restano visibili.
+- Ignora richiesta nasconde in modo reversibile richieste fallite o annullate; /recupera ignorate permette di ripristinarle senza riavvio. Richieste attive e salvataggi di caselle create protetti.
+- Solo metadati dei messaggi e hash della richiesta persistono; nuovi registri inclusi nei backup esistenti e leggibili dalla v1.3.3.
+
+## v1.3.3 — cambio tester dopo cinque minuti
+
+- Cambio automatico dopo cinque minuti dal primo SMS se Libero consente di modificare il numero in sicurezza; reinvio e codice rifiutato non estendono il limite.
+- Codici tardivi e vecchie assegnazioni respinti; verifica gia iniziata non interrotta e nessun incremento dei conteggi senza completamento.
+- Ritorno riconosciuto alla schermata iniziale durante il cambio: esito da verificare, senza ripetere Registrati.
+
 ## v1.3.2 — pulizia delle risposte ordinarie sullo stato della coda
 
 - Le risposte ordinarie di /pausa, /stato e /riprendi condividono una categoria: l'ultima resta sempre, le precedenti sono eliminate dopo 24 ore e prima del limite Telegram di 48 ore.

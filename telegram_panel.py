@@ -85,6 +85,11 @@ class AdminChatCleanup:
             category TEXT NOT NULL CHECK(category='queue'),
             sent_at INTEGER NOT NULL CHECK(sent_at>0),
             PRIMARY KEY(owner,bot,message))""")
+        db.execute("""CREATE TABLE IF NOT EXISTS admin_recovery_messages (
+            owner INTEGER NOT NULL, bot INTEGER NOT NULL, message INTEGER NOT NULL,
+            batch TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('list','confirm','usage')),
+            sent_at INTEGER NOT NULL, delete_at INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY(owner,bot,message))""")
         self.lock = asyncio.Lock()
         self.retry_at = 0.0
 
@@ -134,6 +139,27 @@ class AdminChatCleanup:
             return False
         return True
 
+    def track_recovery(self, bot, message, batch, kind):
+        if (not all(self.valid_id(v) for v in (self.owner, bot, message))
+                or not isinstance(batch, str) or not re.fullmatch(r'[0-9a-f]{16}', batch)
+                or kind not in ('list', 'confirm', 'usage')):
+            raise ValueError('Invalid recovery metadata')
+        now = int(time.time())
+        self.db.execute('INSERT OR IGNORE INTO admin_recovery_messages VALUES (?,?,?,?,?,?,?)',
+            (self.owner, bot, message, batch, kind, now, now + 1800 if kind == 'usage' else 0))
+
+    def finish_recovery(self, bot, batch, *, message=None):
+        if not self.valid_id(bot) or not isinstance(batch, str) or not re.fullmatch(r'[0-9a-f]{16}', batch):
+            raise ValueError('Invalid recovery cleanup batch')
+        if message is not None and not self.valid_id(message):
+            raise ValueError('Invalid recovery cleanup message')
+        sql = 'UPDATE admin_recovery_messages SET delete_at=? WHERE owner=? AND bot=? AND batch=?'
+        values = (int(time.time()), self.owner, bot, batch)
+        if message is not None:
+            sql += ' AND message=?'
+            values += (message,)
+        self.db.execute(sql, values)
+
     async def drain(self, bot, current_message):
         async with self.lock:
             if time.monotonic() < self.retry_at:
@@ -160,7 +186,7 @@ class AdminChatCleanup:
                     AND message < (SELECT MAX(message) FROM admin_response_history
                         WHERE owner=? AND bot=? AND category='queue')
                     ORDER BY sent_at,message LIMIT 8''',
-                    (self.owner,bot.id,now-86400,self.owner,bot.id)).fetchall()
+                    (self.owner,bot.id,now-43200,self.owner,bot.id)).fetchall()
                 for message, sent_at in rows:
                     current = current_message() if callable(current_message) else current_message
                     latest = self.db.execute('''SELECT MAX(message) FROM admin_response_history
@@ -168,13 +194,26 @@ class AdminChatCleanup:
                     if message == latest:
                         continue
                     if (self.valid_id(message) and message != current
-                            and now - 172800 < sent_at <= now - 86400):
+                            and now - 172800 < sent_at <= now - 43200):
                         if not await self.delete_known(bot, message):
                             return
                     # Expired metadata cannot be used to delete Telegram history older than 48h.
                     # A restored current-panel pointer is protected even if it was tracked wrongly.
                     self.db.execute('DELETE FROM admin_response_history WHERE owner=? AND bot=? AND message=?',
                                     (self.owner,bot.id,message))
+                # Only observed recovery messages; no chat history scan or message text.
+                self.db.execute('DELETE FROM admin_recovery_messages WHERE owner=? AND bot=? AND sent_at<=?',
+                                (self.owner, bot.id, now - 172800))
+                rows = self.db.execute('''SELECT message FROM admin_recovery_messages
+                    WHERE owner=? AND bot=? AND delete_at>0 AND delete_at<=?
+                    ORDER BY delete_at,message LIMIT 8''', (self.owner, bot.id, now)).fetchall()
+                for (message,) in rows:
+                    current = current_message() if callable(current_message) else current_message
+                    if self.valid_id(message) and message != current:
+                        if not await self.delete_known(bot, message):
+                            return
+                    self.db.execute('DELETE FROM admin_recovery_messages WHERE owner=? AND bot=? AND message=?',
+                                    (self.owner, bot.id, message))
             except sqlite3.Error:
                 self.retry_at = time.monotonic() + 10
                 LOGGER.warning('Registro della pulizia amministrativa non disponibile')

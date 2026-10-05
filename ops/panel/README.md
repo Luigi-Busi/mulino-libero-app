@@ -150,7 +150,7 @@ di /pausa, /stato e /riprendi sono registrate in admin_response_history. Un'unic
 categoria queue conserva owner, bot, message e sent_at (secondi UTC dalla data
 Telegram), senza testo, argomenti, credenziali o identificativi delle richieste.
 La risposta con ID Telegram maggiore resta sempre. Le precedenti vengono
-eliminate quando hanno almeno 24 ore e meno di 48 ore; oltre il limite Telegram
+eliminate quando hanno almeno 12 ore e meno di 48 ore; oltre il limite Telegram
 è eliminato soltanto il riferimento obsoleto, non un messaggio della cronologia.
 
 Il ciclo esistente della coda esegue la pulizia anche mentre è in pausa e senza
@@ -169,3 +169,29 @@ precedente all'attivazione; i suoi messaggi non sono cancellati.
 La tabella aggiuntiva è conservata da tutti i backup del registro e ignorata
 dalla v1.3.1 in rollback. Conteggi, pausa e struttura delle altre tabelle non
 cambiano. Il browser e il suo collegamento restano quelli già configurati.
+
+
+### Recupero e pulizia (v1.3.4)
+
+L'avviso d'uso di /recupera si elimina dopo 30 minuti. Per ogni nuovo elenco
+il bot registra solo identificativi dei messaggi e un identificativo casuale
+della pagina. Dopo un nuovo tentativo confermato e accettato nella coda,
+elimina quell'elenco (intestazione, schede e indicazione della pagina seguente)
+e le sue conferme di nuovo tentativo. Non chiude altri elenchi aperti.
+Confermare una casella gia creata non chiude l'elenco. Errori ed esiti restano
+visibili. Conferme fallite o con esito incerto non attivano la pulizia.
+
+Ignora richiesta e disponibile solo per richieste fallite o annullate,
+non attive e senza casella gia registrata. Nasconde la richiesta dal recupero,
+rimuove solo la sua scheda dalla pagina, conserva riga, stato e storico.
+/recupera ignorate (oppure /recupera ignorate 2) permette di ritrovarla e
+Rimetti nel recupero la rende di nuovo visibile senza riavviarla.
+Il contrassegno conserva ID della richiesta e hash della sua firma: se
+stato o destinazione cambiano, la vecchia esclusione non nasconde il nuovo caso.
+Un /riprova esplicito rimane un'azione amministrativa separata.
+
+Scadenze di pulizia e contrassegni Ignora sono nel database gia incluso nei
+backup. La v1.3.3 conserva le tabelle aggiuntive e verifica gli stessi ZIP;
+in rollback la nuova funzione non e disponibile. I pulsanti restano validi
+10 minuti e vengono invalidati insieme alla pagina chiusa. Nessuna scansione
+retroattiva della chat: vecchi elenchi non registrati rimangono fuori dalla pulizia.
