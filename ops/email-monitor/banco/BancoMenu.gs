@@ -1,5 +1,5 @@
 // Il Banco: private account dashboard. No credentials in logs/cache/callback_data.
-const BANCO_MENU_VERSION = '1.1.0';
+const BANCO_MENU_VERSION = '1.1.1';
 const BANCO_STATUS_TAB = 'Stato Account Banco';
 const BANCO_PAGE_SIZE = 8;
 const BANCO_COLORS = ['#ffffff','#ff00ff','#9900ff','#d9d2e9','#b4a7d6','#8e7cc3','#674ea7','#351c75','#20124d'];
@@ -238,10 +238,10 @@ function bancoRoot_() {
   return {text:text,buttons:buttons};
 }
 function bancoSheet_(bi,gid,requestedPage) {
-  const item=bancoFindSheet_(bi,gid),mirror=bancoMirror_(),accounts=bancoAccounts_(item,false);
+  const item=bancoFindSheet_(bi,gid),mirror=bancoMirror_(),accounts=bancoAccounts_(item,false).slice().reverse();
   const pages=Math.max(1,Math.ceil(accounts.length/BANCO_PAGE_SIZE)),page=Math.min(requestedPage,pages-1);
   const batch=accounts.slice(page*BANCO_PAGE_SIZE,(page+1)*BANCO_PAGE_SIZE);
-  let text='📁 '+item.bookTitle+'\n'+item.name+' · '+accounts.length+' account\n'+bancoCounts_(accounts,item,mirror)+'\n\nPagina '+(page+1)+'/'+pages+' · ordine delle righe del foglio\n';
+  let text='📁 '+item.bookTitle+'\n'+item.name+' · '+accounts.length+' account\n'+bancoCounts_(accounts,item,mirror)+'\n\nPagina '+(page+1)+'/'+pages+' · ultimi inseriti per primi\n';
   const buttons=batch.map(a=>[bancoButton_(bancoState_(item,a,mirror).label+' · '+a.name.slice(0,55),'bn:a:'+bi+':'+gid+':'+a.row+':'+a.fingerprint+':'+page)]);
   if (!batch.length) text+='\nNessun account presente.';
   const nav=[];
