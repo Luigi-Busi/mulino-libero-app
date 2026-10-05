@@ -1216,6 +1216,13 @@ class RegistrationBrowser:
         try:
             if await self._find_otp_input() is not None:
                 return False
+            # Il ritorno alla schermata credenziali dopo l'SMS è un reset,
+            # non una possibilità di modificare il numero della verifica.
+            if (await self.page.locator("#username").is_visible()
+                    and await self.page.locator("#password").is_visible()):
+                raise RegistrationError(
+                    "Libero è tornato all'inizio durante il cambio tester. "
+                    "Sessione scaduta o reimpostata: esito da verificare. Non ripetere Registrati.")
             field = await self._find_phone_input()
             if field is None:
                 return False
@@ -2326,6 +2333,8 @@ class Coordinator:
         self.revoked_phones: set[str] = set()
         self.resend_busy = False
         self.last_sms_request_at = float("-inf")
+        self.tester_sms_deadline: Optional[float] = None
+        self.tester_change_reason = "manual"
         self.messages = MessageCleanup(getattr(settings, "data_dir", None))
         self.outcomes = CreatedOutcomes(getattr(settings, "data_dir", None))
         self.paused = self.outcomes.queue_paused()
@@ -2594,6 +2603,8 @@ class Coordinator:
         self.resend_event.clear()
         self.resend_busy = False
         self.last_sms_request_at = float("-inf")
+        self.tester_sms_deadline: Optional[float] = None
+        self.tester_change_reason = "manual"
         self.cancel_event = asyncio.Event()
         self.personal_future = asyncio.get_running_loop().create_future()
         try:
@@ -2667,6 +2678,8 @@ class Coordinator:
             self.revoked_testers.clear()
             self.revoked_phones.clear()
             self.otp_future = None
+            self.tester_sms_deadline = None
+            self.tester_change_reason = "manual"
             self.resend_event.clear()
             self.resend_busy = False
             self.captcha_future = None
@@ -2833,6 +2846,9 @@ class Coordinator:
         # Invalida localmente prima di qualsiasi attesa di rete.
         self.change_tester_allowed = False
         self.assignment_token = self.claim_token = self.assigned_phone = ""
+        self.tester_sms_deadline = None
+        automatic = self.tester_change_reason == "timeout"
+        self.tester_change_reason = "manual"
         request.claimed_by = ""
         self.phone_future = None
         if self.otp_future is not None and not self.otp_future.done():
@@ -2842,12 +2858,14 @@ class Coordinator:
         self.change_tester_event.clear()
         await self.set_queue_fields(request, STATO="IN_CREAZIONE", TELEGRAM_ASSEGNATO="",
                                     TELEFONO_MASCHERATO="", MESSAGGIO_GRUPPO_ID="",
-                                    NOTE="Cambio tester richiesto dall'amministratore")
+                                    NOTE=("Cambio tester automatico: 5 minuti senza codice" if automatic else
+                                          "Cambio tester richiesto dall'amministratore"))
         for phase in ("otp", "availability", "tester_control", "claim"):
             await self.cleanup_messages(request, phase)
         if old_id is not None:
             await self.safe_notice(old_id,
-                "ℹ️ L'amministratore ha richiesto un altro tester. "
+                ("⌛ Sono trascorsi 5 minuti senza codice: passo a un altro tester. " if automatic else
+                 "ℹ️ L'amministratore ha richiesto un altro tester. ") +
                 "Non inviare altri codici per questa registrazione.")
 
     async def notify_otp_sent(
@@ -2855,14 +2873,18 @@ class Coordinator:
     ) -> None:
         if self.otp_future is None:
             self.otp_future = asyncio.get_running_loop().create_future()
-        await self.set_queue_fields(request, STATO="ATTESA_CODICE")
+        # Parte dal primo invio di questa assegnazione, prima delle attese Telegram/Sheets.
         self.last_sms_request_at = asyncio.get_running_loop().time()
+        self.tester_sms_deadline = self.last_sms_request_at + 300
+        await self.set_queue_fields(request, STATO="ATTESA_CODICE")
         await self.send_temporary(request, "otp",
             chat_id=telegram_id,
             text=(
                 f"📨 Invio del codice richiesto al numero {mask_phone(phone)}.\n\n"
                 "Rispondi qui in privato scrivendo soltanto il codice ricevuto. "
-                "Se non arriva, dopo 20 secondi puoi chiedere il reinvio con il pulsante."
+                "Se non arriva, dopo 20 secondi puoi chiedere il reinvio con il pulsante. "
+                "Dopo 5 minuti dal primo invio, senza codice ricevuto, cambio tester. "
+                "Il reinvio non prolunga questo limite."
             ),
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(
                 "📨 Invia di nuovo SMS", callback_data=f"resend:{request.request_id}:{self.assignment_token}"
@@ -2895,13 +2917,17 @@ class Coordinator:
 
         await self.show_tester_control(request)
 
+    def tester_sms_expired(self) -> bool:
+        return (self.tester_sms_deadline is not None
+                and asyncio.get_running_loop().time() >= self.tester_sms_deadline)
+
     def queue_sms_resend(self, request_id: str, telegram_id: int, *, token: Optional[str] = None) -> tuple[bool, str]:
         request = self.active
         if not request or request.request_id != request_id:
             return False, "Richiesta non più attiva."
         if token is not None and token != self.assignment_token:
             return False, "Pulsante di una precedente assegnazione."
-        if self.change_tester_event.is_set():
+        if self.change_tester_event.is_set() or self.tester_sms_expired():
             return False, "Cambio tester in corso."
         if str(request.claimed_by) != str(telegram_id):
             return False, "Pulsante riservato al tester assegnato."
@@ -2921,26 +2947,40 @@ class Coordinator:
         if self.otp_future is None:
             self.otp_future = asyncio.get_running_loop().create_future()
         await self.set_queue_fields(request, STATO="ATTESA_CODICE")
-        if resend is None:
-            result = await self._wait_future(self.otp_future)
-            await self.cleanup_messages(request, "otp")
-            return result
         cancel_task = asyncio.create_task(self.cancel_event.wait())
         resend_task = None
         change_task = asyncio.create_task(self.change_tester_event.wait())
         try:
             while True:
-                resend_task = asyncio.create_task(self.resend_event.wait())
-                await asyncio.wait(
-                    {self.otp_future, cancel_task, resend_task, change_task},
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-                if cancel_task.done():
+                if resend is not None:
+                    resend_task = asyncio.create_task(self.resend_event.wait())
+                waiting = {self.otp_future, cancel_task, change_task}
+                if resend_task is not None:
+                    waiting.add(resend_task)
+                remaining = (None if self.tester_sms_deadline is None else
+                             max(0, self.tester_sms_deadline - asyncio.get_running_loop().time()))
+                await asyncio.wait(waiting, timeout=remaining,
+                                   return_when=asyncio.FIRST_COMPLETED)
+                # Annullamento prima di tutto; un codice già accettato non va perso.
+                if self.cancel_event.is_set():
                     raise RequestCancelled("Richiesta annullata dall'amministratore")
                 if self.otp_future.done():
                     self.change_tester_event.clear()
                     return self.otp_future.result()
                 if self.change_tester_event.is_set():
+                    raise TesterChangeRequested()
+                if self.tester_sms_expired():
+                    # Invalida subito l'accettazione dei codici, prima di attese di rete.
+                    self.tester_change_reason = "timeout"
+                    self.change_tester_allowed = False
+                    self.change_tester_event.set()
+                    try:
+                        await self.send_temporary(request, "progress",
+                            chat_id=self.settings.admin_id,
+                            text="⌛ Nessun codice ricevuto entro 5 minuti. Avvio il cambio tester. "
+                                 "Procedo solo se Libero permette di modificare il numero in sicurezza.")
+                    except TelegramError:
+                        LOGGER.warning("Avviso di cambio tester automatico non recapitato")
                     raise TesterChangeRequested()
                 self.resend_event.clear()
                 self.resend_busy = True
@@ -2959,6 +2999,10 @@ class Coordinator:
                 finally:
                     self.resend_busy = False
                 await self.send_temporary(request, "otp", chat_id=int(request.claimed_by), text=text)
+                if resend_task is not None:
+                    resend_task.cancel()
+                    await asyncio.gather(resend_task, return_exceptions=True)
+                    resend_task = None
         finally:
             self.resend_event.clear()
             self.change_tester_allowed = False
@@ -4149,7 +4193,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         and coordinator.otp_future
         and not coordinator.otp_future.done()
     ):
-        if coordinator.change_tester_event.is_set():
+        if coordinator.change_tester_event.is_set() or coordinator.tester_sms_expired():
             await coordinator.delete_input(request, message)
             return
         receiver = coordinator.otp_future

@@ -276,3 +276,25 @@ python -m unittest discover -s tests -v
 Non verificano le librerie esterne o i selettori del sito. La sintassi degli
 script e la struttura Compose sono controllate separatamente. La costruzione
 Docker e il collegamento ai tuoi account si verificano sul VPS con `install.sh`.
+
+### Cambio automatico del tester dopo 5 minuti (v1.3.3)
+
+Dopo il primo invio SMS di ogni assegnazione, il Mugnaio attende al massimo
+5 minuti per il codice. Il reinvio SMS e un codice rifiutato dal sito non
+prolungano questo limite. Un codice gia ricevuto in tempo viene verificato;
+il timer non interrompe la verifica in corso. I codici arrivati dopo la
+scadenza e i pulsanti della precedente assegnazione vengono respinti.
+
+Alla scadenza il bot avvisa l'amministratore, scollega il tester e invalida
+la sua assegnazione. Richiede un numero diverso soltanto dopo aver ritrovato
+il campo Cellulare della verifica, senza finestra OTP sovrapposta. Usa solo
+un comando esplicito del sito per modificare il numero; se non lo trova,
+conserva la sessione e chiede un intervento tramite browser remoto.
+Non ripete Registrati. Se riconosce i campi iniziali nome utente/password
+visibili durante il cambio, segnala la sessione scaduta o reimpostata e
+l'esito da verificare tramite /recupera prima di un eventuale nuovo tentativo.
+
+Un reinvio gia in corso termina prima del cambio, senza azioni sovrapposte.
+Ogni nuovo tester riceve una nuova finestra di 5 minuti. Il conteggio tester
+continua ad aumentare soltanto per registrazioni completate con SMS verificato.
+La modifica non altera formato dei dati, segreti o archivio delle immagini.
