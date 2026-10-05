@@ -1,3 +1,9 @@
+## v1.3.5 — ripresa esplicita delle richieste ignorate
+
+- Un /riprova accettato rimuove il vecchio contrassegno Ignora: un successivo errore della stessa richiesta rimane visibile nel recupero.
+- Quando cambia la firma della richiesta, il contrassegno vecchio viene eliminato anziche poter ricomparire se lo stato torna uguale.
+- Comprende tutte le modifiche di pulizia e recupero della v1.3.4.
+
 ## v1.3.4 — pulizia a 12 ore e gestione del recupero
 
 - Le risposte ordinarie della coda si eliminano dopo 12 ore, conservando sempre l'ultima e proteggendo gli avvisi.

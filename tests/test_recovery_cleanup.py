@@ -203,6 +203,16 @@ class RecoveryFlowTests(unittest.IsolatedAsyncioTestCase):
         await self.click('ignore',rid='fixture-0')
         self.requests[0].destination_row+=1
         self.assertFalse(worker.recovery_ignored(self.c,self.requests[0]))
+        self.requests[0].destination_row-=1
+        self.assertFalse(worker.recovery_ignored(self.c,self.requests[0]))
+
+    async def test_explicit_retry_clears_ignore_for_later_failure_of_same_request(self):
+        await self.listing()
+        await self.click('ignore',rid='fixture-0')
+        self.context.args=['fixture-0']
+        await worker.retry_command(self.u,self.context)
+        self.store.retry.assert_called_once_with('fixture-0')
+        self.assertFalse(worker.recovery_ignored(self.c,self.requests[0]))
 
     async def test_old_ignore_button_cannot_hide_a_newly_recorded_outcome(self):
         await self.listing()

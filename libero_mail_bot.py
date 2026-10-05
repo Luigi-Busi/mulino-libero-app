@@ -3637,7 +3637,17 @@ def recovery_ignored(coordinator: Coordinator, request: QueueRequest) -> bool:
     row = coordinator.outcomes.db.execute(
         'SELECT signature FROM recovery_ignored WHERE request_id=?', (request.request_id,)).fetchone()
     signature = hashlib.sha256(json.dumps(recovery_signature(request)).encode()).hexdigest()
+    if row and row[0] != signature:
+        coordinator.outcomes.db.execute('DELETE FROM recovery_ignored WHERE request_id=?', (request.request_id,))
+        return False
     return bool(row and row[0] == signature)
+
+
+def clear_recovery_ignore(coordinator: Coordinator, request_id: str) -> None:
+    coordinator.outcomes.db.execute('DELETE FROM recovery_ignored WHERE request_id=?', (request_id,))
+    # Un nuovo tentativo invalida anche i pulsanti di vecchi elenchi della stessa richiesta.
+    coordinator.recovery_buttons = {k:v for k,v in coordinator.recovery_buttons.items()
+                                    if v["request_id"] != request_id}
 
 
 async def recovery_reply(coordinator: Coordinator, source: Any, text: str, *,
@@ -3840,6 +3850,7 @@ async def recovery_callback_locked(update: Update, context: ContextTypes.DEFAULT
         elif action == "retry_yes":
             result = await asyncio.to_thread(coordinator.store.retry, request.request_id)
             if result:
+                clear_recovery_ignore(coordinator, request.request_id)
                 await finish_recovery(coordinator, item.get("batch", ""))
             await query.message.reply_text(("✅ Richiesta rimessa in coda."
                 + (" La coda e in pausa: partira dopo /riprendi." if coordinator.paused else "")) if result else
@@ -4084,6 +4095,8 @@ async def retry_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         )
         return
     result = await asyncio.to_thread(coordinator.store.retry, request_id)
+    if result:
+        clear_recovery_ignore(coordinator, request_id)
     await update.effective_message.reply_text(
         ("✅ Richiesta rimessa in coda."
          + (" La coda e in pausa: partira dopo /riprendi." if coordinator.paused else ""))
