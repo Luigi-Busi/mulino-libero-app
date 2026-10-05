@@ -10,6 +10,16 @@ si installa nella sottocartella `app`. Non sostituire il tuo `.env` con
 
 ## Cosa fa
 
+La v1.3.6 controlla il ritorno al modulo iniziale di Libero durante l'attesa
+del tester, della conferma finale del passaggio telefonico e del codice SMS.
+La presenza visibile dei campi iniziali nome utente e password, senza una
+finestra OTP attiva, interrompe il tentativo e invalida i pulsanti del tester.
+Il controllo viene ripetuto circa ogni due secondi durante le attese Telegram
+e prima di inserire il numero, inviare o reinviare un SMS e verificare il codice.
+Una pagina sconosciuta o in caricamento non è sufficiente per dichiarare una
+sessione scaduta. Non viene ripetuta automaticamente la registrazione: l'esito
+va verificato con /recupera. Restano incluse le modifiche di pulizia v1.3.5.
+
 1. EmailMatcher cerca il nominativo negli archivi esistenti.
 2. Se l'e-mail non esiste, crea una richiesta nel foglio `Coda`.
 3. Il nuovo bot chiede privatamente all'amministratore:

@@ -142,6 +142,10 @@ class RegistrationError(RuntimeError):
     """Errore gestito durante la registrazione."""
 
 
+class RegistrationSessionReset(RegistrationError):
+    """Il modulo iniziale è riapparso dopo l'avvio della verifica telefonica."""
+
+
 class RequestCancelled(RegistrationError):
     """Richiesta annullata dall'amministratore."""
 
@@ -694,6 +698,8 @@ class RegistrationBrowser:
                     reason = "completed"
                     return username, f"{username}@libero.it"
                 except BaseException as exc:
+                    if isinstance(exc, RegistrationSessionReset):
+                        self.coordinator.invalidate_phone_session()
                     self.diagnostics.failure(exc)
                     reason = self.diagnostics.reason
                     if isinstance(exc, PlaywrightTimeoutError):
@@ -953,7 +959,9 @@ class RegistrationBrowser:
             if phone_sent:
                 # La stessa sessione resta aperta durante correzioni e reinvii.
                 if not final_confirmed:
-                    await self.coordinator.request_final_confirmation(request, username)
+                    await self.coordinator.request_final_confirmation(
+                        request, username, ready_check=self._assert_phone_session
+                    )
                     final_confirmed = True
                 await self._verify_sms_until_completed(request)
                 return
@@ -1102,7 +1110,7 @@ class RegistrationBrowser:
                     return candidate
         return None
 
-    async def _find_otp_input(self) -> Optional[Locator]:
+    async def _find_otp_input(self, *, require_editable: bool = True) -> Optional[Locator]:
         assert self.page
         label = re.compile(r"codice\s+(?:di\s+)?(?:conferma|verifica)|codice\s+sms", re.I)
         selectors = [
@@ -1123,7 +1131,7 @@ class RegistrationBrowser:
             ]
             for locator in locators:
                 for candidate in await locator.all():
-                    if await candidate.is_visible() and await candidate.is_editable():
+                    if await candidate.is_visible() and (not require_editable or await candidate.is_editable()):
                         return candidate
         return None
 
@@ -1177,6 +1185,7 @@ class RegistrationBrowser:
                 await self._handle_captcha_if_needed(request)
                 if await self._is_success_page():
                     return "success"
+                await self._assert_phone_session()
                 try:
                     feedback = await self._otp_feedback()
                 except PlaywrightError:
@@ -1210,19 +1219,33 @@ class RegistrationBrowser:
             # anche un identico messaggio d'errore rimasto sulla pagina.
             cleared = True
 
+    async def _assert_phone_session(self) -> None:
+        """Observe only: visible initial credentials are a reset, never a retry."""
+        assert self.page
+        await self._check_cancelled()
+        try:
+            if self.page.is_closed():
+                raise RegistrationError("Il browser è stato chiuso durante l'attesa della verifica telefonica.")
+            if await self._find_otp_input(require_editable=False) is not None:
+                return  # Non scambiare la pagina sotto la finestra SMS per un reset.
+            if (await self.page.locator("#username").is_visible()
+                    and await self.page.locator("#password").is_visible()):
+                raise RegistrationSessionReset(
+                    "Libero è tornato all'inizio durante l'attesa della verifica telefonica. "
+                    "Sessione scaduta o reimpostata: tentativo interrotto. "
+                    "Verificare se la casella esiste prima di riprovare. Non ripetere Registrati.")
+        except PlaywrightError:
+            if self.page.is_closed():
+                raise RegistrationError("Il browser è stato chiuso durante l'attesa della verifica telefonica.") from None
+            # Un cambio pagina può sostituire momentaneamente il documento.
+
     async def _phone_edit_ready(self) -> bool:
         # La finestra OTP deve essere scomparsa: il campo Mail o Cellulare
         # della pagina sottostante non deve mai essere usato per questo cambio.
         try:
-            if await self._find_otp_input() is not None:
+            if await self._find_otp_input(require_editable=False) is not None:
                 return False
-            # Il ritorno alla schermata credenziali dopo l'SMS è un reset,
-            # non una possibilità di modificare il numero della verifica.
-            if (await self.page.locator("#username").is_visible()
-                    and await self.page.locator("#password").is_visible()):
-                raise RegistrationError(
-                    "Libero è tornato all'inizio durante il cambio tester. "
-                    "Sessione scaduta o reimpostata: esito da verificare. Non ripetere Registrati.")
+            await self._assert_phone_session()
             field = await self._find_phone_input()
             if field is None:
                 return False
@@ -1277,13 +1300,17 @@ class RegistrationBrowser:
 
     async def _choose_phone_and_send(self, request: QueueRequest) -> None:
         while True:
-            phone, user_id = await self.coordinator.request_phone(request)
+            await self._assert_phone_session()
+            phone, user_id = await self.coordinator.request_phone(
+                request, ready_check=self._assert_phone_session
+            )
             if self.coordinator.change_tester_event.is_set():
                 await self.coordinator.revoke_tester(request)
                 continue
             # Dal riempimento all'invio numero il cambio è escluso.
             self.coordinator.change_tester_allowed = False
             await self._check_cancelled()
+            await self._assert_phone_session()
             field = await self._find_phone_input()
             if field is None:
                 await self._return_to_phone_form(request)
@@ -1292,6 +1319,7 @@ class RegistrationBrowser:
                 raise RegistrationError("Campo Cellulare non più disponibile.")
             self.stage = "compilazione del numero di telefono"
             await self._fill_phone(field, phone)
+            await self._assert_phone_session()
             self.coordinator.otp_future = asyncio.get_running_loop().create_future()
             await self.coordinator.set_queue_fields(
                 request, STATO="ATTESA_CODICE", TELEGRAM_ASSEGNATO=str(user_id),
@@ -1299,7 +1327,9 @@ class RegistrationBrowser:
             )
             self.stage = "richiesta del codice SMS"
             await self._check_cancelled()
+            await self._assert_phone_session()
             await self._click_first_button(["Invia codice", "Ricevi codice", "Continua", "Avanti"])
+            await self._assert_phone_session()
             await self.coordinator.notify_otp_sent(request, user_id, phone)
             return
 
@@ -1313,18 +1343,22 @@ class RegistrationBrowser:
         while True:
             await self._check_cancelled()
             try:
-                code = await self.coordinator.request_otp(request, resend=self._resend_sms)
+                code = await self.coordinator.request_otp(
+                    request, resend=self._resend_sms, ready_check=self._assert_phone_session
+                )
             except TesterChangeRequested:
                 await self._replace_phone_tester(request)
                 continue
             # Un reinvio può sostituire la finestra: cercare di nuovo il campo.
             otp_input = await self._wait_for_otp_input(request)
+            await self._assert_phone_session()
             self.stage = "compilazione del codice SMS"
             await otp_input.fill(code)
             code = None  # Non conservare il codice oltre la compilazione.
             previous_feedback = await self._otp_feedback()
             await self.coordinator.set_queue_fields(request, STATO="VERIFICA_CODICE")
             await self._check_cancelled()
+            await self._assert_phone_session()
             self.stage = "verifica del codice SMS"
             try:
                 await self._click_first_button(["Verifica", "Conferma", "Continua", "Avanti"])
@@ -1341,10 +1375,15 @@ class RegistrationBrowser:
     async def _wait_for_otp_input(self, request: QueueRequest) -> Locator:
         """Attende la finestra SMS senza reinviare numero, codice o modulo."""
         assert self.page
+        async def otp_ready() -> bool:
+            await self._assert_phone_session()
+            return await self._find_otp_input() is not None
+
         while True:
             self.stage = "attesa del campo Codice di conferma SMS"
             for _ in range(30):
                 await self._check_cancelled()
+                await self._assert_phone_session()
                 candidate = await self._find_otp_input()
                 if candidate is not None:
                     return candidate
@@ -1362,6 +1401,7 @@ class RegistrationBrowser:
                     "manualmente. Premi il pulsante qui sotto per ripetere soltanto "
                     "il riconoscimento del campo. Puoi interrompere con /annulla."
                 ),
+                ready_check=otp_ready,
             )
             await self._check_cancelled()
             await self.coordinator.set_queue_fields(request, STATO="ATTESA_CODICE")
@@ -1399,6 +1439,7 @@ class RegistrationBrowser:
     async def _resend_sms(self) -> None:
         assert self.page
         await self._check_cancelled()
+        await self._assert_phone_session()
         label = re.compile(r"^\s*Invia di nuovo\s*$", re.I)
         for frame in self.page.frames:
             locators = [frame.get_by_role("link", name=label),
@@ -1409,7 +1450,9 @@ class RegistrationBrowser:
                     if await candidate.is_visible() and await candidate.is_enabled():
                         # Un solo clic per richiesta, senza reinvii automatici.
                         await candidate.click(timeout=5_000)
+                        await self._assert_phone_session()
                         return
+        await self._assert_phone_session()
         raise RegistrationError("Il comando Invia di nuovo non è disponibile sul sito.")
 
     async def _find_final_button(self) -> Optional[Locator]:
@@ -2647,18 +2690,27 @@ class Coordinator:
                     "⚠️ Casella già creata: il completamento del salvataggio richiede attenzione. "
                     "Non ripetere la registrazione. Il bot ritenta il salvataggio disponibile.")
                 return
+            if isinstance(exc, RegistrationSessionReset):
+                self.invalidate_phone_session()
+                if request.claimed_by:
+                    await self.safe_notice(int(request.claimed_by),
+                        "⌛ La sessione di Libero è scaduta o ripartita dall'inizio. "
+                        "Questo tentativo è stato interrotto: non attendere né inviare altri codici. "
+                        "L'amministratore verificherà l'esito.")
             error_text = (
                 redact_secrets(str(exc))
                 if isinstance(exc, RegistrationError)
                 else f"Errore tecnico: {type(exc).__name__}"
             )
             LOGGER.error("Registrazione %s fallita (%s)", request.request_id, type(exc).__name__)
-            await self.set_queue_fields(
-                request,
-                STATO="ERRORE",
-                ERRORE=error_text[:500],
-                NOTE="Verificare se la casella esiste; usare /recupera prima di riprovare",
-            )
+            # Attendere eventuali scritture di un claim iniziato prima del reset.
+            async with self._claim_lock:
+                await self.set_queue_fields(
+                    request,
+                    STATO="ERRORE",
+                    ERRORE=error_text[:500],
+                    NOTE="Verificare se la casella esiste; usare /recupera prima di riprovare",
+                )
             await self.bot.send_message(
                 chat_id=self.settings.admin_id,
                 text=(
@@ -2728,19 +2780,41 @@ class Coordinator:
         await self.cleanup_messages(request, "personal")
         return personal
 
-    async def _wait_future(self, future: asyncio.Future[Any]) -> Any:
+    async def _wait_future(self, future: asyncio.Future[Any], *, ready_check: Any = None) -> Any:
         cancel_task = asyncio.create_task(self.cancel_event.wait())
-        done, _ = await asyncio.wait(
-            {future, cancel_task}, return_when=asyncio.FIRST_COMPLETED
-        )
-        if cancel_task in done:
-            if not future.done():
-                future.cancel()
-            raise RequestCancelled("Richiesta annullata dall'amministratore")
-        cancel_task.cancel()
-        return future.result()
+        try:
+            while True:
+                if self.cancel_event.is_set():
+                    if not future.done():
+                        future.cancel()
+                    raise RequestCancelled("Richiesta annullata dall'amministratore")
+                if ready_check is not None:
+                    await ready_check()
+                if self.cancel_event.is_set():
+                    raise RequestCancelled("Richiesta annullata dall'amministratore")
+                if future.done():
+                    return future.result()
+                await asyncio.wait({future, cancel_task},
+                    timeout=2 if ready_check is not None else None,
+                    return_when=asyncio.FIRST_COMPLETED)
+        except RegistrationSessionReset:
+            self.invalidate_phone_session()
+            raise
+        finally:
+            cancel_task.cancel()
+            await asyncio.gather(cancel_task, return_exceptions=True)
 
-    async def request_phone(self, request: QueueRequest) -> tuple[str, int]:
+    def invalidate_phone_session(self) -> None:
+        # Invalida prima delle attese di rete, inclusi claim/reinvii in arrivo.
+        self.claim_token = self.assignment_token = ""
+        self.change_tester_allowed = False
+        self.tester_sms_deadline = None
+        self.resend_event.clear()
+        for future in (self.phone_future, self.otp_future):
+            if future is not None and not future.done():
+                future.cancel()
+
+    async def request_phone(self, request: QueueRequest, *, ready_check: Any = None) -> tuple[str, int]:
         self.phone_future = asyncio.get_running_loop().create_future()
         self.claim_token = secrets.token_hex(4)
         await self.set_queue_fields(
@@ -2763,7 +2837,7 @@ class Coordinator:
             request,
             MESSAGGIO_GRUPPO_ID=str(message.message_id),
         )
-        result = await self._wait_future(self.phone_future)
+        result = await self._wait_future(self.phone_future, ready_check=ready_check)
         await self.cleanup_messages(request, "claim")
         await self.show_tester_control(request)
         return result
@@ -2779,7 +2853,13 @@ class Coordinator:
                 return False, "La tua assegnazione è stata revocata per questa registrazione."
             if self.phone_future.done():
                 return False, "La richiesta è già stata presa in carico."
+            claim_future, claim_token = self.phone_future, self.claim_token
+            def still_available():
+                return (self.active is request and self.phone_future is claim_future
+                        and not claim_future.done() and self.claim_token == claim_token)
             whitelist = await asyncio.to_thread(self.store.whitelist_map)
+            if not still_available():
+                return False, "La sessione non è più disponibile."
             phone = whitelist.get(telegram_id)
             if not phone:
                 return False, "Il tuo Telegram ID non è presente nella whitelist."
@@ -2792,12 +2872,16 @@ class Coordinator:
                 )
             except (Forbidden, BadRequest):
                 return False, "Apri prima la chat privata del bot e premi Avvia, poi riprova."
+            if not still_available():
+                return False, "La sessione non è più disponibile."
             await self.set_queue_fields(
                 request,
                 TELEGRAM_ASSEGNATO=str(telegram_id),
                 TELEFONO_MASCHERATO=mask_phone(phone),
                 NOTE="Numero preso in carico",
             )
+            if not still_available():
+                return False, "La sessione non è più disponibile."
             self.assignment_token = secrets.token_hex(4)
             self.assigned_phone = phone
             self.phone_future.set_result((phone, telegram_id))
@@ -2944,7 +3028,7 @@ class Coordinator:
         self.resend_event.set()
         return True, "Reinvio richiesto. Attendi il messaggio del bot."
 
-    async def request_otp(self, request: QueueRequest, *, resend: Any = None) -> str:
+    async def request_otp(self, request: QueueRequest, *, resend: Any = None, ready_check: Any = None) -> str:
         # Un codice può arrivare prima che il browser rilevi il campo OTP.
         # Il risultato già ricevuto non deve essere sostituito da un nuovo Future.
         if self.otp_future is None:
@@ -2955,6 +3039,10 @@ class Coordinator:
         change_task = asyncio.create_task(self.change_tester_event.wait())
         try:
             while True:
+                if self.cancel_event.is_set():
+                    raise RequestCancelled("Richiesta annullata dall'amministratore")
+                if ready_check is not None:
+                    await ready_check()
                 if resend is not None:
                     resend_task = asyncio.create_task(self.resend_event.wait())
                 waiting = {self.otp_future, cancel_task, change_task}
@@ -2962,11 +3050,15 @@ class Coordinator:
                     waiting.add(resend_task)
                 remaining = (None if self.tester_sms_deadline is None else
                              max(0, self.tester_sms_deadline - asyncio.get_running_loop().time()))
+                if ready_check is not None:
+                    remaining = min(2, remaining) if remaining is not None else 2
                 await asyncio.wait(waiting, timeout=remaining,
                                    return_when=asyncio.FIRST_COMPLETED)
                 # Annullamento prima di tutto; un codice già accettato non va perso.
                 if self.cancel_event.is_set():
                     raise RequestCancelled("Richiesta annullata dall'amministratore")
+                if ready_check is not None:
+                    await ready_check()
                 if self.otp_future.done():
                     self.change_tester_event.clear()
                     return self.otp_future.result()
@@ -2985,6 +3077,12 @@ class Coordinator:
                     except TelegramError:
                         LOGGER.warning("Avviso di cambio tester automatico non recapitato")
                     raise TesterChangeRequested()
+                if not self.resend_event.is_set():
+                    if resend_task is not None:
+                        resend_task.cancel()
+                        await asyncio.gather(resend_task, return_exceptions=True)
+                        resend_task = None
+                    continue
                 self.resend_event.clear()
                 self.resend_busy = True
                 self.last_sms_request_at = asyncio.get_running_loop().time()
@@ -2994,7 +3092,11 @@ class Coordinator:
                         "📨 Ho premuto Invia di nuovo sul sito. "
                         "Attendi il nuovo SMS e rispondi qui soltanto con il nuovo codice."
                     )
+                except RegistrationSessionReset:
+                    raise  # Un reset non è un reinvio dall'esito incerto.
                 except (RegistrationError, PlaywrightTimeoutError):
+                    if ready_check is not None:
+                        await ready_check()
                     text = (
                         "⚠️ Non posso confermare il reinvio sul sito. "
                         "Attendi un eventuale SMS; se non arriva, avvisa l'amministratore."
@@ -3006,6 +3108,9 @@ class Coordinator:
                     resend_task.cancel()
                     await asyncio.gather(resend_task, return_exceptions=True)
                     resend_task = None
+        except RegistrationSessionReset:
+            self.invalidate_phone_session()
+            raise
         finally:
             self.resend_event.clear()
             self.change_tester_allowed = False
@@ -3069,7 +3174,7 @@ class Coordinator:
             await self.cleanup_messages(request, "captcha")
 
     async def request_final_confirmation(
-        self, request: QueueRequest, username: str
+        self, request: QueueRequest, username: str, *, ready_check: Any = None
     ) -> None:
         self.final_future = asyncio.get_running_loop().create_future()
         keyboard = InlineKeyboardMarkup(
@@ -3095,7 +3200,7 @@ class Coordinator:
             ),
             reply_markup=keyboard,
         )
-        result = await self._wait_future(self.final_future)
+        result = await self._wait_future(self.final_future, ready_check=ready_check)
         await self.cleanup_messages(request, "final")
         if not result:
             raise RequestCancelled("Creazione finale non autorizzata")
