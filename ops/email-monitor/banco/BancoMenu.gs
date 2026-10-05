@@ -1,5 +1,5 @@
 // Il Banco: private account dashboard. No credentials in logs/cache/callback_data.
-const BANCO_MENU_VERSION = '1.1.1';
+const BANCO_MENU_VERSION = '1.1.2';
 const BANCO_STATUS_TAB = 'Stato Account Banco';
 const BANCO_PAGE_SIZE = 8;
 const BANCO_COLORS = ['#ffffff','#ff00ff','#9900ff','#d9d2e9','#b4a7d6','#8e7cc3','#674ea7','#351c75','#20124d'];
@@ -7,15 +7,18 @@ const BANCO_COLORS = ['#ffffff','#ff00ff','#9900ff','#d9d2e9','#b4a7d6','#8e7cc3
 // Manual commissioning check: only the configured administrator receives views.
 function bancoVerificaMenuPrivato() {
   const chat={id:String(ADMIN_TELEGRAM_ID),type:'private'};
+  bancoAnswerCallback_({id:'commissioning-expired-callback'});
   const root=bancoRender_(chat,null,bancoRoot_());
   const items=bancoSheets_(),item=items.find(s=>s.name==='Sisal Sport') || items[0];
-  let detail=null;
+  let list=null,descending=true;
   if (item) {
-    const accounts=bancoAccounts_(item,false),mirror=bancoMirror_();
-    const account=accounts.find(a=>bancoState_(item,a,mirror).code==='active') || accounts[0];
-    if (account) detail=bancoRender_(chat,null,bancoAccount_(item.bookIndex,item.gid,account.row,account.fingerprint,0));
+    const view=bancoSheet_(item.bookIndex,item.gid,0);
+    const rows=view.buttons.flat().filter(b=>b.callback_data.indexOf('bn:a:')===0).map(b=>Number(b.callback_data.split(':')[4]));
+    descending=rows.every((row,i)=>i===0 || row<rows[i-1]);
+    if (!descending) throw new Error('Ordine account non valido');
+    list=bancoRender_(chat,null,view);
   }
-  console.log(JSON.stringify({ok:true,version:BANCO_MENU_VERSION,worksheets:items.length,root_message:root.message_id,detail_message:detail && detail.message_id}));
+  console.log(JSON.stringify({ok:true,version:BANCO_MENU_VERSION,worksheets:items.length,root_message:root.message_id,list_message:list && list.message_id,descending:descending,expired_callback_does_not_block:true}));
 }
 
 function bancoRiceviStati_(rows) {
@@ -62,6 +65,16 @@ function bancoApi_(method, data) {
   return value.result;
 }
 
+function bancoAnswerCallback_(callback,options) {
+  try {bancoApi_('answerCallbackQuery',Object.assign({callback_query_id:callback.id},options||{}));}
+  catch (_) {console.warn('Banco: conferma clic non disponibile; apertura schermata prosegue.');}
+}
+function bancoMenuFailure_(chat) {
+  const text='Non riesco ad aggiornare la schermata. Riprova con /menu. Nessuna modifica è stata effettuata agli account.';
+  const result=bancoApi_('sendMessage',{chat_id:String(chat.id),text:text});
+  try {bancoLegacySent_(chat.id,result.message_id,text);} catch (_) {}
+}
+
 function bancoPrivateAdmin_(actor, chat) {
   return !!actor && !!chat && !actor.is_bot && chat.type === 'private' &&
     String(actor.id) === String(ADMIN_TELEGRAM_ID) && String(chat.id) === String(ADMIN_TELEGRAM_ID);
@@ -83,13 +96,15 @@ function bancoGestisciUpdate(update) {
   const chat = message && message.chat;
   if (!bancoPrivateAdmin_(actor,chat)) {
     if (!recognized) return false;
-    if (callback) bancoApi_('answerCallbackQuery',{callback_query_id:callback.id,text:'Menu riservato alla chat privata dell’amministratore.',show_alert:true});
+    if (callback) bancoAnswerCallback_(callback,{text:'Menu riservato alla chat privata dell’amministratore.',show_alert:true});
     else if (chat) bancoApi_('sendMessage',{chat_id:chat.id,text:'Menu riservato alla chat privata dell’amministratore.'});
     return true;
   }
-  bancoObserve_(message,callback && /^bn:cmd:/.test(data)?'/'+data.split(':')[2]:command,callback);
+  // A delayed/expired Telegram acknowledgement must never swallow the action.
+  if (recognized && callback) bancoAnswerCallback_(callback);
+  try {bancoObserve_(message,callback && /^bn:cmd:/.test(data)?'/'+data.split(':')[2]:command,callback);}
+  catch (_) {if (recognized) {bancoMenuFailure_(chat);return true;} throw _;}
   if (!recognized) return false;
-  if (callback) bancoApi_('answerCallbackQuery',{callback_query_id:callback.id});
   // Existing commands continue through the original authorization/correction code.
   if (callback && /^bn:cmd:(correggi|annulla|test|id)$/.test(data)) {
     update.message = {from:actor, chat:chat, message_id:message.message_id,text:'/'+data.split(':')[2]};
@@ -111,7 +126,7 @@ function bancoGestisciUpdate(update) {
     }
     bancoRender_(chat,callback ? message.message_id : null,view);
   } catch (_) {
-    bancoApi_('sendMessage',{chat_id:String(chat.id),text:'Non riesco ad aggiornare la schermata. Riprova con /menu. Nessuna modifica è stata effettuata agli account.'});
+    bancoMenuFailure_(chat);
   }
   return true;
 }
@@ -225,6 +240,8 @@ function bancoCounts_(accounts,item,mirror) {
   return '🟢 '+counts.active+'  🟠 '+counts.documents+'  ✅ '+counts.reactivated+'  ⚪ '+counts.unmonitored+(counts.unknown?'  🔵 '+counts.unknown:'');
 }
 function bancoRoot_() {
+  const cache=CacheService.getScriptCache(),key='bn:root:'+BANCO_MENU_VERSION;
+  if (!bancoForceRefresh_) {try {const hit=cache.get(key);if(hit) return JSON.parse(hit);} catch (_) {}}
   const mirror=bancoMirror_(),items=bancoSheets_(),buttons=[];
   let text='📊 Stato account\n\n';let lastBook=null;
   items.forEach(item=>{
@@ -235,7 +252,9 @@ function bancoRoot_() {
   });
   text+='🟢 Attivo · 🟠 Richiesta documenti · ✅ Riattivato\n⚪ Non monitorato · 🔵 In attesa di controllo\n\nUltimo controllo: '+bancoDate_(mirror.updated);
   buttons.push([bancoButton_('🔄 Aggiorna','bn:r:root'),bancoButton_('🏠 Menu','bn:menu')]);
-  return {text:text,buttons:buttons};
+  const view={text:text,buttons:buttons};
+  try {cache.put(key,JSON.stringify(view),45);} catch (_) {}
+  return view;
 }
 function bancoSheet_(bi,gid,requestedPage) {
   const item=bancoFindSheet_(bi,gid),mirror=bancoMirror_(),accounts=bancoAccounts_(item,false).slice().reverse();

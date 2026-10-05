@@ -100,5 +100,5 @@ function bancoConfiguraManutenzione() {
 }
 function bancoInvalidate_() {
   const cache=CacheService.getScriptCache();
-  if (typeof cache.removeAll==='function') cache.removeAll(bancoBooks_().flatMap(b=>['Sisal Sport','PokerStars'].map(n=>'bn:'+BANCO_MENU_VERSION+':'+b.id+':'+n)));
+  if (typeof cache.removeAll==='function') cache.removeAll(bancoBooks_().flatMap(b=>['Sisal Sport','PokerStars'].map(n=>'bn:'+BANCO_MENU_VERSION+':'+b.id+':'+n)).concat(['bn:root:'+BANCO_MENU_VERSION]));
 }
