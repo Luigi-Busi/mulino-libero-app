@@ -146,6 +146,12 @@ class RegistrationError(RuntimeError):
     """Errore gestito durante la registrazione."""
 
 
+class RegistrationProviderCooldown(RegistrationError):
+    def __init__(self, safe_to_retry: bool):
+        super().__init__("Libero segnala attività anomala e richiede di attendere alcuni minuti.")
+        self.safe_to_retry = safe_to_retry
+
+
 class RegistrationSessionReset(RegistrationError):
     """Il modulo iniziale è riapparso dopo l'avvio della verifica telefonica."""
 
@@ -736,6 +742,7 @@ class RegistrationBrowser:
         self.page: Optional[Page] = None
         self.stage = "avvio del browser"
         self.expected_email: Optional[str] = None
+        self.phone_verification_started = False
         self.diagnostics: Optional[BrowserDiagnostics] = None
 
     @property
@@ -801,7 +808,7 @@ class RegistrationBrowser:
                     reason = "completed"
                     return username, f"{username}@libero.it"
                 except BaseException as exc:
-                    if isinstance(exc, RegistrationSessionReset):
+                    if isinstance(exc, (RegistrationSessionReset, RegistrationProviderCooldown)):
                         self.coordinator.invalidate_phone_session()
                     self.diagnostics.failure(exc)
                     reason = self.diagnostics.reason
@@ -1326,6 +1333,7 @@ class RegistrationBrowser:
         """Observe only: visible initial credentials are a reset, never a retry."""
         assert self.page
         await self._check_cancelled()
+        await self._raise_if_provider_blocked()
         try:
             if self.page.is_closed():
                 raise RegistrationError("Il browser è stato chiuso durante l'attesa della verifica telefonica.")
@@ -1402,6 +1410,7 @@ class RegistrationBrowser:
             await self._check_cancelled()
 
     async def _choose_phone_and_send(self, request: QueueRequest) -> None:
+        self.phone_verification_started = True
         while True:
             await self._assert_phone_session()
             phone, user_id = await self.coordinator.request_phone(
@@ -1690,6 +1699,22 @@ class RegistrationBrowser:
                 raise RegistrationError("Il browser è stato chiuso durante l'attesa del CAPTCHA.")
             return False
 
+    async def _raise_if_provider_blocked(self, body: Optional[str] = None) -> None:
+        assert self.page
+        parts = urlsplit(self.page.url)
+        if parts.scheme != "https" or parts.hostname != "registrazione.libero.it":
+            return
+        pattern = re.compile(r"attività\s+anomala[.\s]+riprova\s+ad\s+eseguire\s+l[’']operazione\s+tra\s+alcuni\s+minuti", re.I)
+        matches = self.page.get_by_text(pattern)
+        if not any([await node.is_visible() for node in await matches.all()]):
+            return
+        body = body if body is not None else normalize_spaces(await self.page.locator("body").inner_text()).lower()
+        success = any(x in body for x in ("registrazione completata", "account creato", "entra nella tua mail"))
+        safe = (parts.path == "/join3.phtml" and not success and not self.phone_verification_started
+                and await self._is_account_protection_page()
+                and await self._find_otp_input(require_editable=False) is None)
+        raise RegistrationProviderCooldown(bool(safe))
+
     async def _is_success_page(self) -> bool:
         assert self.page
         parts = urlsplit(self.page.url)
@@ -1702,6 +1727,7 @@ class RegistrationBrowser:
             await self.page.wait_for_load_state("domcontentloaded")
             await self.page.wait_for_timeout(1_000)
         body = normalize_spaces(await self.page.locator("body").inner_text()).lower()
+        await self._raise_if_provider_blocked(body)
         failure = re.search(
             r"non (?:è |e' |e’ )?(?:stato )?possibile (?:\w+ ){0,4}"
             r"(?:creare|completare|registrare|creazione|registrazione)"
@@ -2083,6 +2109,39 @@ class CreatedOutcomes:
         self.db.execute("INSERT INTO runtime_settings(key,value) VALUES ('queue_paused',?) "
                         "ON CONFLICT(key) DO UPDATE SET value=excluded.value", ("1" if paused else "0",))
 
+
+    def provider_cooldown(self) -> Optional[dict]:
+        row = self.db.execute("SELECT value FROM runtime_settings WHERE key='provider_cooldown'").fetchone()
+        if not row or row[0] == "null":
+            return None
+        state = json.loads(row[0])
+        if (not isinstance(state, dict) or not isinstance(state.get('until'), (int, float))
+                or not isinstance(state.get('request_id'), str)
+                or type(state.get('retry')) is not bool or type(state.get('reconciled')) is not bool):
+            raise RegistrationError("Stato pausa Libero non valido: ripresa bloccata.")
+        return state
+
+    def save_provider_cooldown(self, state: Optional[dict]) -> None:
+        self.db.execute("INSERT INTO runtime_settings(key,value) VALUES ('provider_cooldown',?) "
+                        "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (json.dumps(state),))
+
+    def start_provider_cooldown(self, request_id: str, safe: bool) -> dict:
+        self.db.execute('SAVEPOINT provider_block')
+        try:
+            key = 'provider_retry_count:' + request_id
+            row = self.db.execute('SELECT value FROM runtime_settings WHERE key=?', (key,)).fetchone()
+            count = (int(row[0]) if row else 0) + 1
+            self.db.execute('INSERT INTO runtime_settings(key,value) VALUES (?,?) '
+                            'ON CONFLICT(key) DO UPDATE SET value=excluded.value', (key, str(count)))
+            state = dict(until=time.time() + 300, request_id=request_id,
+                         retry=bool(safe and count <= 3), reconciled=False)
+            self.save_provider_cooldown(state)
+            self.db.execute('RELEASE provider_block')
+            return state
+        except BaseException:
+            self.db.execute('ROLLBACK TO provider_block')
+            self.db.execute('RELEASE provider_block')
+            raise
 
     def save(self, request: QueueRequest, username: str, email: str, *, sms_proof=None) -> None:
         previous = self.get(request.request_id)
@@ -2489,6 +2548,8 @@ class Coordinator:
         self.outcomes.db.execute("""CREATE TABLE IF NOT EXISTS recovery_ignored (
             request_id TEXT PRIMARY KEY, signature TEXT NOT NULL)""")
         self.paused = self.outcomes.queue_paused()
+        self.provider_cooldown = self.outcomes.provider_cooldown()
+        self.provider_deadline = time.monotonic() + max(0, self.provider_cooldown['until'] - time.time()) if self.provider_cooldown else 0
         self.pause_persisted = True
         self.created_in_memory: dict[str, Any] = {}
         self.sms_verified: dict[str, tuple[int, str]] = {}
@@ -2583,22 +2644,81 @@ class Coordinator:
         self.paused = paused
         self.pause_persisted = True
 
+    def provider_waiting(self) -> bool:
+        return time.monotonic() < self.provider_deadline
+
+    async def reconcile_provider_cooldown(self) -> None:
+        state = self.provider_cooldown
+        if not state:
+            return
+        if not state['reconciled']:
+            request = await asyncio.to_thread(self.store.find_request, state['request_id'])
+            retry = False
+            if (request and request.request_id not in self.outcomes.ids()
+                    and request.request_id not in self.created_in_memory
+                    and request.status not in {'CREATA', 'CREATA_DA_SALVARE', 'ANNULLATA'}):
+                retry = state['retry']
+                if retry:
+                    try:
+                        await asyncio.to_thread(self.store.validate_start, request)
+                    except RegistrationError:
+                        retry = False
+                async with self._claim_lock:
+                    await self.set_queue_fields(request,
+                        STATO='DA_COMPLETARE_ANAGRAFICA' if retry else 'ERRORE',
+                        TELEGRAM_ASSEGNATO='', TELEFONO_MASCHERATO='', MESSAGGIO_GRUPPO_ID='',
+                        ERRORE='Libero: attività anomala; attesa di 5 minuti',
+                        NOTE=('Tentativo rifiutato da Libero; ripresa dopo la pausa automatica'
+                              if retry else 'Verificare esito o blocco ripetuto con /recupera prima di riprovare'))
+            next_state = dict(state, reconciled=True, retry=retry)
+            self.outcomes.save_provider_cooldown(next_state)
+            self.provider_cooldown = state = next_state
+        if not self.provider_waiting():
+            self.outcomes.save_provider_cooldown(None)
+            self.provider_cooldown = None
+
+    async def handle_provider_cooldown(self, request: QueueRequest, exc: RegistrationProviderCooldown) -> None:
+        self.invalidate_phone_session()
+        self.provider_deadline = time.monotonic() + 300
+        try:
+            safe = (exc.safe_to_retry and request.request_id not in self.sms_verified
+                    and request.request_id not in self.outcomes.ids()
+                    and request.request_id not in self.created_in_memory)
+            self.provider_cooldown = self.outcomes.start_provider_cooldown(request.request_id, safe)
+        except Exception:
+            self.set_paused(True)
+            await self.safe_notice(self.settings.admin_id,
+                '⚠️ Libero ha bloccato il tentativo. Pausa di sicurezza: non riesco a salvare il timer. Controlla /stato.')
+            raise
+        if request.claimed_by:
+            await self.safe_notice(int(request.claimed_by),
+                '⌛ Libero ha interrotto questo tentativo. Non inviare altri codici; il bot attende prima di riprendere.')
+        await self.reconcile_provider_cooldown()
+        await self.safe_notice(self.settings.admin_id,
+            '⌛ Libero segnala attività anomala. Tentativo chiuso; attendo almeno 5 minuti prima di avviare altre registrazioni.\n'
+            + ('La richiesta interrotta resta in coda e ripartirà con l’Apprendista.'
+               if self.provider_cooldown and self.provider_cooldown['retry'] else
+               'Questa richiesta richiede verifica con /recupera: esito incerto o limite di tre riprese automatiche raggiunto.')
+            + '\nUna tua /pausa resta valida anche dopo il timer; /riprendi non accorcia l’attesa.')
+
     def queue_status_text(self) -> str:
+        wait = (f"\nAttesa Libero: {max(1, int(self.provider_deadline - time.monotonic()) + 1)} secondi."
+                if self.provider_waiting() else '')
         if not self.paused:
-            return "Coda: ATTIVA."
+            return "Coda: ATTIVA." + wait
         if not self.pause_persisted:
-            return "Coda: IN PAUSA solo in memoria; pausa non salvata sul VPS."
-        return "Coda: IN PAUSA (salvata anche per i riavvii)."
+            return "Coda: IN PAUSA solo in memoria; pausa non salvata sul VPS." + wait
+        return "Coda: IN PAUSA (salvata anche per i riavvii)." + wait
 
     def registration_busy(self) -> bool:
         return self.active is not None or bool(self.processing_task and not self.processing_task.done())
 
     async def next_request_unless_paused(self) -> Optional[QueueRequest]:
-        if self.paused:
+        if self.paused or self.provider_waiting() or (self.provider_cooldown and not self.provider_cooldown["reconciled"]):
             return None
         request = await asyncio.to_thread(self.store.next_request)
         # /pausa puo arrivare mentre Google Sheets risponde nel thread.
-        return None if self.paused else request
+        return None if self.paused or self.provider_waiting() else request
 
     def record_created(self, request: QueueRequest, username: str, email: str) -> None:
         self.created_in_memory[request.request_id] = (request, username, email)
@@ -2710,6 +2830,7 @@ class Coordinator:
                 if self.recovery_pending:
                     await asyncio.to_thread(self.store.recover_interrupted, self.outcomes.ids())
                     self.recovery_pending = False
+                await self.reconcile_provider_cooldown()
                 if not self.processing_task or self.processing_task.done():
                     if self.processing_task:
                         try:
@@ -2741,7 +2862,7 @@ class Coordinator:
 
     async def process_request(self, request: QueueRequest) -> None:
         # Protegge anche il task selezionato ma non ancora iniziato.
-        if self.paused:
+        if self.paused or self.provider_waiting() or (self.provider_cooldown and not self.provider_cooldown["reconciled"]):
             return
         if request.request_id in self.outcomes.ids() or request.request_id in self.created_in_memory:
             await self.sync_pending_outcomes()
@@ -2790,6 +2911,8 @@ class Coordinator:
             if request.claimed_by:
                 await self.safe_notice(int(request.claimed_by),
                     "✅ Registrazione completata. Grazie per il codice.")
+        except RegistrationProviderCooldown as exc:
+            await self.handle_provider_cooldown(request, exc)
         except RequestCancelled as exc:
             await self.set_queue_fields(
                 request, STATO="ANNULLATA", ERRORE=str(exc), NOTE=""
@@ -2909,7 +3032,7 @@ class Coordinator:
                 await asyncio.wait({future, cancel_task},
                     timeout=2 if ready_check is not None else None,
                     return_when=asyncio.FIRST_COMPLETED)
-        except RegistrationSessionReset:
+        except (RegistrationSessionReset, RegistrationProviderCooldown):
             self.invalidate_phone_session()
             raise
         finally:
@@ -3204,7 +3327,7 @@ class Coordinator:
                         "📨 Ho premuto Invia di nuovo sul sito. "
                         "Attendi il nuovo SMS e rispondi qui soltanto con il nuovo codice."
                     )
-                except RegistrationSessionReset:
+                except (RegistrationSessionReset, RegistrationProviderCooldown):
                     raise  # Un reset non è un reinvio dall'esito incerto.
                 except (RegistrationError, PlaywrightTimeoutError):
                     if ready_check is not None:
@@ -3220,7 +3343,7 @@ class Coordinator:
                     resend_task.cancel()
                     await asyncio.gather(resend_task, return_exceptions=True)
                     resend_task = None
-        except RegistrationSessionReset:
+        except (RegistrationSessionReset, RegistrationProviderCooldown):
             self.invalidate_phone_session()
             raise
         finally:
@@ -3611,8 +3734,8 @@ async def manual_mail_command(update: Update, context: ContextTypes.DEFAULT_TYPE
                 "Attendi il completamento; se è fallita o annullata verifica prima l'esito con /recupera.")
         return
     await message.reply_text(f"📬 Richiesta manuale accodata.\nID: {request.request_id}\n"
-        "Userò la procedura e la password già configurate. Ti chiederò in privato i dati anagrafici "
-        "e ti comunicherò la mail al completamento.\n" + coordinator.queue_status_text())
+        "Userò la procedura e la password già configurate. Chiederò i dati anagrafici nel gruppo all’Apprendista "
+        "e ti comunicherò in privato la mail al completamento.\n" + coordinator.queue_status_text())
 
 
 async def panel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

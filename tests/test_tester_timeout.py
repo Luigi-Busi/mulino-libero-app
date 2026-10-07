@@ -147,7 +147,7 @@ class SafeBrowserChangeTests(unittest.IsolatedAsyncioTestCase):
     def browser(self, *, otp=False, initial=False):
         c = SimpleNamespace(revoke_tester=AsyncMock(), cancel_event=asyncio.Event())
         b = worker.RegistrationBrowser(SimpleNamespace(), c)
-        b.page = SimpleNamespace(is_closed=Mock(return_value=False), locator=Mock(return_value=SimpleNamespace(
+        b.page = SimpleNamespace(url="about:blank", is_closed=Mock(return_value=False), locator=Mock(return_value=SimpleNamespace(
             is_visible=AsyncMock(return_value=initial))))
         b._find_otp_input = AsyncMock(return_value=object() if otp else None)
         b._find_phone_input = AsyncMock(return_value=SimpleNamespace(click=AsyncMock()))

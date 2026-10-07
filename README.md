@@ -10,6 +10,18 @@ si installa nella sottocartella `app`. Non sostituire il tuo `.env` con
 
 ## Cosa fa
 
+### Attesa dopo rifiuto temporaneo di Libero: v1.3.9
+
+Il messaggio visibile di attività anomala con invito a riprovare tra alcuni minuti
+chiude il tentativo e blocca l’avvio di tutta la coda per almeno cinque minuti.
+Il timer è persistente, separato dalla pausa dell’amministratore e non viene
+accorciato da /riprendi. La richiesta interrotta torna in coda soltanto per un
+rifiuto esplicito nella schermata Protezione Account, senza finestra OTP o
+segnali di completamento; si ricontrollano esito locale e destinazione prima
+della ripresa. Dopo tre riprese automatiche della stessa richiesta, o in caso
+di esito incerto, occorre verificare con /recupera. Non si cambiano IP o identità
+per aggirare il blocco. La ripresa richiede nuovamente i dati all’Apprendista.
+
 ### Creazione su richiesta privata: v1.3.8
 
 In privato al Mugnaio, solo l'amministratore può usare `/creamail Nome | Cognome`.
