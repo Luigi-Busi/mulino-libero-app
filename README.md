@@ -10,6 +10,26 @@ si installa nella sottocartella `app`. Non sostituire il tuo `.env` con
 
 ## Cosa fa
 
+### Creazione su richiesta privata: v1.3.7
+
+In privato al Mugnaio, solo l'amministratore può usare `/creamail Nome | Cognome`.
+Per nomi semplici funziona anche `/creamail Mario Rossi`; il separatore `|`
+preserva i nomi e cognomi composti. Il comando accoda una richiesta nella coda
+ordinaria e non supera la pausa né interrompe altre registrazioni. I dati
+anagrafici vengono chiesti all'amministratore in privato per queste richieste.
+Browser, password configurata, CAPTCHA, conferma finale, verifica SMS con
+whitelist e conteggi dei tester restano quelli del normale processo.
+
+Lo storico `Richieste Manuali` risiede nello stesso libro Google della Coda:
+nessun account viene inserito nei fogli operativi del Banco. Usa identificativi
+stabili e salva la mail completata; il risultato viene comunicato in privato.
+Il comando ricontrolla le richieste esistenti anche del Banco per lo stesso
+nominativo e non ne avvia una seconda. Omonimi e richieste multiple richiedono
+una verifica esplicita. In caso di errore o annullamento usare `/recupera`
+dopo aver verificato se la casella esiste; `/creamail` non ripete automaticamente
+un tentativo fallito. Un accodamento dall'esito incerto viene prima riservato
+in stato non eseguibile e ricontrollato tramite lo stesso comando.
+
 La v1.3.6 controlla il ritorno al modulo iniziale di Libero durante l'attesa
 del tester, della conferma finale del passaggio telefonico e del codice SMS.
 La presenza visibile dei campi iniziali nome utente e password, senza una

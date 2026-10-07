@@ -30,6 +30,7 @@ import sqlite3
 import sys
 import time
 import unicodedata
+import uuid
 from contextlib import closing
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
@@ -120,6 +121,9 @@ QUEUE_HEADERS = [
 ]
 
 WHITELIST_HEADERS = ["TELEGRAM_ID", "NUMERO_TELEFONO"]
+MANUAL_SHEET = "Richieste Manuali"
+MANUAL_HEADERS = ["ID_MULINO", "Nome e Cognome", "Email", "Nome", "Cognome", "Creata il"]
+MANUAL_PENDING = "MANUALE_DA_CONFERMARE"
 
 TRANSIENT_STATUSES = {
     "ATTESA_ANAGRAFICA",
@@ -382,6 +386,87 @@ class GoogleQueueStore:
             raise RegistrationError("ID richiesta duplicato in Coda: nessuna modifica.")
         return matches[0] if matches else None
 
+    def manual_sheet(self) -> gspread.Worksheet:
+        """Use the existing queue book; never repair an occupied unrelated tab."""
+        try:
+            sheet = self.book.worksheet(MANUAL_SHEET)
+        except gspread.WorksheetNotFound:
+            sheet = self.book.add_worksheet(title=MANUAL_SHEET, rows=100, cols=len(MANUAL_HEADERS))
+        values = sheet.get_all_values()
+        if not any(str(value).strip() for row in values for value in row):
+            sheet.update(range_name="A1:F1", values=[MANUAL_HEADERS], value_input_option="RAW")
+        self._validate_headers(sheet, MANUAL_HEADERS)
+        return sheet
+
+    def manual_name_parts(self, request: QueueRequest) -> tuple[str, str]:
+        if not is_manual_request(request, self.settings.spreadsheet_id):
+            raise RegistrationError("La richiesta non appartiene allo storico manuale.")
+        sheet = self.book.worksheet(MANUAL_SHEET)
+        self._validate_headers(sheet, MANUAL_HEADERS)
+        values = sheet.get_all_values()
+        row, _, _, _ = resolve_account_target(request, values)
+        first, last = parse_manual_name(audit_cell(values, row, 4) + " | " + audit_cell(values, row, 5))
+        if audit_normalize(first + " " + last) != audit_normalize(request.full_name):
+            raise RegistrationError("Nome e cognome dello storico manuale sono cambiati: richiesta bloccata.")
+        return first, last
+
+    def create_manual_request(self, first: str, last: str) -> tuple[QueueRequest, str, bool]:
+        first, last = parse_manual_name(first + " | " + last)
+        full_name = first + " " + last
+        rows = self.queue.get_all_values()
+        records, malformed = audit_queue_records(rows)
+        if malformed:
+            raise RegistrationError("Coda incompleta: usa /controlla prima di aggiungere richieste.")
+        if sum(str(x).strip() == "ID_ACCOUNT" for x in rows[0]) != 1:
+            raise RegistrationError("Colonna ID_ACCOUNT mancante o duplicata: nessun accodamento.")
+        same = [(r, email) for r, email, _ in records
+                if audit_normalize(r.full_name) == audit_normalize(full_name)]
+        if len(same) > 1:
+            raise RegistrationError("Esistono più richieste per questo nominativo. Verifica /recupera o /controlla.")
+        rid = str(uuid.uuid5(uuid.NAMESPACE_URL,
+            "mulino-manual:" + self.settings.spreadsheet_id + ":" + audit_normalize(full_name)))
+        if same:
+            request, email = same[0]
+            if request.status != MANUAL_PENDING:
+                return request, email, False
+            if (request.request_id != rid or request.account_id != rid
+                    or not is_manual_request(request, self.settings.spreadsheet_id)):
+                raise RegistrationError("Richiesta manuale incompleta o modificata: nessun nuovo tentativo.")
+            if self.manual_name_parts(request) != (first, last):
+                raise RegistrationError("La separazione Nome/Cognome differisce dalla richiesta precedente.")
+        else:
+            sheet = self.manual_sheet()
+            values = sheet.get_all_values()
+            targets = [i for i in range(2, len(values) + 1) if audit_cell(values, i, 1) == rid]
+            if len(targets) > 1:
+                raise RegistrationError("Identificativo duplicato nello storico manuale: nessun accodamento.")
+            if not targets:
+                sheet.append_row([rid, full_name, "", first, last, now_text()], value_input_option="RAW")
+                values = sheet.get_all_values()
+                targets = [i for i in range(2, len(values) + 1) if audit_cell(values, i, 1) == rid]
+            if len(targets) != 1:
+                raise RegistrationError("Salvataggio dello storico non confermato. Ripeti lo stesso comando per ricontrollare.")
+            target = targets[0]
+            if (audit_cell(values, target, 2) != full_name
+                    or audit_cell(values, target, 4) != first or audit_cell(values, target, 5) != last
+                    or audit_cell(values, target, 3)):
+                raise RegistrationError("Lo storico contiene dati diversi o una mail già presente. Verifica prima di riprovare.")
+            fields = dict(ID_RICHIESTA=rid, CREATA_IL=now_text(), AGGIORNATA_IL=now_text(),
+                STATO=MANUAL_PENDING, SPREADSHEET_DESTINAZIONE=self.settings.spreadsheet_id,
+                FOGLIO_DESTINAZIONE=MANUAL_SHEET, RIGA_DESTINAZIONE=target,
+                COLONNA_EMAIL=3, NOME_COMPLETO=full_name, ID_ACCOUNT=rid,
+                TENTATIVI=0, NOTE="Richiesta manuale dell'amministratore; accodamento da confermare")
+            # Prima riserva una riga non eseguibile. Un append dall'esito incerto
+            # non può avviare il browser né essere ripetuto automaticamente.
+            self.queue.append_row([fields.get(str(header).strip(), "") for header in rows[0]],
+                value_input_option="RAW")
+            request = self.find_request(rid)
+            if request is None:
+                raise RegistrationError("Accodamento non confermato: ripeti lo stesso comando per ricontrollare.")
+        self.validate_start(request)
+        self.update(request, STATO="DA_COMPLETARE_ANAGRAFICA", NOTE="Richiesta manuale dell'amministratore")
+        return request, "", True
+
     def update(self, request: QueueRequest, **fields: Any) -> None:
         current = self.find_request(request.request_id)
         if (not current or not compatible_destination(request, current)
@@ -542,10 +627,28 @@ class GoogleQueueStore:
         return True
 
 
-def parse_personal_data(text: str, full_name: str) -> PersonalData:
+def is_manual_request(request: QueueRequest, book_id: str) -> bool:
+    return request.destination_sheet == MANUAL_SHEET and request.destination_spreadsheet == book_id
+
+
+def parse_manual_name(text: str) -> tuple[str, str]:
+    if len(text) > 200 or any(ord(x) < 32 or ord(x) == 127 for x in text):
+        raise ValueError("Nome non valido. Usa /creamail Nome | Cognome.")
+    parts = text.split("|") if "|" in text else text.split()
+    if len(parts) != 2:
+        raise ValueError("Usa /creamail Nome | Cognome. Per nomi composti il separatore | è necessario.")
+    first, last = (normalize_spaces(x) for x in parts)
+    for value in (first, last):
+        if (not value or len(value) > 80 or not any(x.isalpha() for x in value)
+                or any(not (x.isalpha() or x in " '-.’" or unicodedata.category(x).startswith("M")) for x in value)):
+            raise ValueError("Nome e cognome devono contenere lettere, spazi, apostrofi o trattini.")
+    return first, last
+
+
+def parse_personal_data(text: str, full_name: str, *, name_parts: Optional[tuple[str, str]] = None) -> PersonalData:
     parts = [normalize_spaces(part) for part in text.split("|")]
     if len(parts) == 3:
-        first_name, last_name = split_name(full_name)
+        first_name, last_name = name_parts or split_name(full_name)
         birth_text, gender_text, city_text = parts
     elif len(parts) == 5:
         first_name, last_name, birth_text, gender_text, city_text = parts
@@ -2352,6 +2455,8 @@ class Coordinator:
         self.active: Optional[QueueRequest] = None
         self.personal_future: Optional[asyncio.Future[PersonalData]] = None
         self.personal_prompt_id: Optional[int] = None
+        self.personal_name_parts: Optional[tuple[str, str]] = None
+        self.manual_request_lock = asyncio.Lock()
         self.personal_prompt_ready = asyncio.Event()
         self.personal_invalid_notified = False
         self.personal_last_message_id = 0
@@ -2540,7 +2645,9 @@ class Coordinator:
             self.outcomes.completed(request_id)
             if not synced:
                 await self.safe_notice(self.settings.admin_id,
-                    f"✅ Libero Mail creata e inserita nel foglio:\n{email}")
+                    (f"✅ Libero Mail creata:\n{email}\nSalvata nello storico delle richieste manuali."
+                     if is_manual_request(current, getattr(self.settings, "spreadsheet_id", "")) else
+                     f"✅ Libero Mail creata e inserita nel foglio:\n{email}"))
             return True
 
     async def restore_audited_outcome(self, request: QueueRequest) -> None:
@@ -2653,9 +2760,12 @@ class Coordinator:
         self.tester_change_reason = "manual"
         self.cancel_event = asyncio.Event()
         self.personal_future = asyncio.get_running_loop().create_future()
+        self.personal_name_parts = None
         try:
             if request.account_id:
                 await asyncio.to_thread(self.store.validate_start, request)
+            if is_manual_request(request, getattr(self.settings, "spreadsheet_id", "")):
+                self.personal_name_parts = await asyncio.to_thread(self.store.manual_name_parts, request)
             await self.set_queue_fields(
                 request,
                 STATO="ATTESA_ANAGRAFICA",
@@ -2724,6 +2834,7 @@ class Coordinator:
             )
         finally:
             self.personal_future = None
+            self.personal_name_parts = None
             self.personal_prompt_id = None
             self.personal_prompt_ready.set()
             self.phone_future = None
@@ -2753,10 +2864,12 @@ class Coordinator:
         self.personal_prompt_ready.clear()
         self.personal_invalid_notified = False
         self.personal_last_message_id = 0
-        group_id = getattr(self.settings, "anagrafica_group_id", 0)
+        group_id = (0 if is_manual_request(request, getattr(self.settings, "spreadsheet_id", ""))
+                    else getattr(self.settings, "anagrafica_group_id", 0))
         text = (
-            "🪪 Nuova registrazione Libero da completare\n\n"
-            f"Nome presente nel foglio: {request.full_name}\n\n"
+            "🪪 Nuova registrazione Libero da completare\n\n" +
+            (f"Nome: {self.personal_name_parts[0]}\nCognome: {self.personal_name_parts[1]}\n\n"
+             if self.personal_name_parts else f"Nome presente nel foglio: {request.full_name}\n\n") +
             "Invia:\nGG/MM/AAAA | M/F | Città (Provincia)\n\n"
             "Se devo correggere la separazione Nome/Cognome:\n"
             "Nome | Cognome | GG/MM/AAAA | M/F | Città (Provincia)\n\n"
@@ -3430,7 +3543,7 @@ async def start_panel_backup(coordinator: Coordinator, *, status_only: bool) -> 
 
 ADMIN_CLEAN_COMMANDS = frozenset(('start','menu','pannello','conteggio','conteggi','azzera',
     'id','idgruppo','stato','recupera','controlla','backup','pausa','browser','riprendi',
-    'annulla','riprova','conferma_creata'))
+    'annulla','riprova','conferma_creata','creamail'))
 
 
 def admin_command(callback):
@@ -3459,6 +3572,48 @@ def admin_command(callback):
             await coordinator.panel.cleanup.drain(coordinator.bot,
                                                  lambda: coordinator.panel.message_id(coordinator.bot.id))
     return wrapped
+
+
+async def manual_mail_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    coordinator: Coordinator = context.application.bot_data["coordinator"]
+    user, chat, message = update.effective_user, update.effective_chat, update.effective_message
+    if (not user or not chat or not message or user.id != coordinator.settings.admin_id
+            or chat.type != ChatType.PRIVATE or chat.id != coordinator.settings.admin_id
+            or getattr(message, "forward_origin", None) or getattr(message, "is_automatic_forward", False)):
+        return
+    parts = (message.text or "").split(maxsplit=1)
+    try:
+        first, last = parse_manual_name(parts[1] if len(parts) == 2 else "")
+    except ValueError as exc:
+        await message.reply_text(str(exc))
+        return
+    async with coordinator.manual_request_lock:
+        try:
+            request, email, added = await asyncio.to_thread(coordinator.store.create_manual_request, first, last)
+        except RegistrationError as exc:
+            await message.reply_text(str(exc))
+            return
+        except Exception as exc:
+            LOGGER.warning("Accodamento manuale non confermato (%s)", type(exc).__name__)
+            await message.reply_text("⚠️ Non posso confermare l'accodamento. "
+                "Ripeti lo stesso /creamail con lo stesso nominativo per ricontrollare, "
+                "senza avviare tentativi separati. La richiesta non viene duplicata intenzionalmente.")
+            return
+    if not added:
+        saved = coordinator.outcomes.get(request.request_id)
+        if saved:
+            email = saved[2]
+        if email and (saved or request.status == "CREATA"):
+            await message.reply_text(f"✅ Per questo nominativo risulta già creata la mail:\n{email}\n"
+                                     f"ID: {request.request_id}\nNon ho avviato una nuova registrazione.")
+        else:
+            await message.reply_text(f"ℹ️ Esiste già una richiesta per questo nominativo.\n"
+                f"ID: {request.request_id}\nStato: {request.status}\n"
+                "Attendi il completamento; se è fallita o annullata verifica prima l'esito con /recupera.")
+        return
+    await message.reply_text(f"📬 Richiesta manuale accodata.\nID: {request.request_id}\n"
+        "Userò la procedura e la password già configurate. Ti chiederò in privato i dati anagrafici "
+        "e ti comunicherò la mail al completamento.\n" + coordinator.queue_status_text())
 
 
 async def panel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -4340,7 +4495,8 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     if (request.status == "ATTESA_ANAGRAFICA" and coordinator.personal_future
             and not coordinator.personal_future.done()):
-        group_id = getattr(coordinator.settings, "anagrafica_group_id", 0)
+        group_id = (0 if is_manual_request(request, getattr(coordinator.settings, "spreadsheet_id", ""))
+                    else getattr(coordinator.settings, "anagrafica_group_id", 0))
         if group_id:
             if (getattr(chat, "id", None) != group_id
                     or chat.type not in {"group", "supergroup"}
@@ -4364,7 +4520,8 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             return
         coordinator.messages.track(request.request_id, "personal", message)
         try:
-            personal = parse_personal_data(message.text, request.full_name)
+            personal = parse_personal_data(message.text, request.full_name,
+                name_parts=getattr(coordinator, "personal_name_parts", None))
         except ValueError as exc:
             if group_id:
                 # Nessuna risposta all'altro bot: evita cicli automatici di errori.
@@ -4574,6 +4731,7 @@ def main() -> None:
     application.add_handler(CommandHandler("idgruppo", admin_command(group_id_command)))
     application.add_handler(CommandHandler("stato", admin_command(status_command)))
     application.add_handler(CommandHandler("recupera", admin_command(recovery_command)))
+    application.add_handler(CommandHandler("creamail", admin_command(manual_mail_command)))
     application.add_handler(CommandHandler("controlla", admin_command(consistency_command)))
     application.add_handler(CommandHandler("backup", admin_command(backup_command)))
     application.add_handler(CommandHandler("pausa", admin_command(pause_command)))
