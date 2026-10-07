@@ -10,13 +10,14 @@ si installa nella sottocartella `app`. Non sostituire il tuo `.env` con
 
 ## Cosa fa
 
-### Creazione su richiesta privata: v1.3.7
+### Creazione su richiesta privata: v1.3.8
 
 In privato al Mugnaio, solo l'amministratore può usare `/creamail Nome | Cognome`.
 Per nomi semplici funziona anche `/creamail Mario Rossi`; il separatore `|`
 preserva i nomi e cognomi composti. Il comando accoda una richiesta nella coda
 ordinaria e non supera la pausa né interrompe altre registrazioni. I dati
-anagrafici vengono chiesti all'amministratore in privato per queste richieste.
+anagrafici vengono richiesti nel gruppo configurato all'Apprendista, con lo
+stesso flusso e gli stessi controlli delle richieste automatiche.
 Browser, password configurata, CAPTCHA, conferma finale, verifica SMS con
 whitelist e conteggi dei tester restano quelli del normale processo.
 
@@ -42,7 +43,7 @@ va verificato con /recupera. Restano incluse le modifiche di pulizia v1.3.5.
 
 1. EmailMatcher cerca il nominativo negli archivi esistenti.
 2. Se l'e-mail non esiste, crea una richiesta nel foglio `Coda`.
-3. Il nuovo bot chiede privatamente all'amministratore:
+3. Il nuovo bot chiede i dati nel gruppo configurato con l'Apprendista:
    `GG/MM/AAAA | M/F | Città (PR)`.
 4. Il worker apre Libero in un contesto browser nuovo.
 5. Quando serve il telefono, il bot pubblica nel gruppo un messaggio generico.

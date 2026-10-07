@@ -2864,8 +2864,7 @@ class Coordinator:
         self.personal_prompt_ready.clear()
         self.personal_invalid_notified = False
         self.personal_last_message_id = 0
-        group_id = (0 if is_manual_request(request, getattr(self.settings, "spreadsheet_id", ""))
-                    else getattr(self.settings, "anagrafica_group_id", 0))
+        group_id = getattr(self.settings, "anagrafica_group_id", 0)
         text = (
             "🪪 Nuova registrazione Libero da completare\n\n" +
             (f"Nome: {self.personal_name_parts[0]}\nCognome: {self.personal_name_parts[1]}\n\n"
@@ -4495,8 +4494,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     if (request.status == "ATTESA_ANAGRAFICA" and coordinator.personal_future
             and not coordinator.personal_future.done()):
-        group_id = (0 if is_manual_request(request, getattr(coordinator.settings, "spreadsheet_id", ""))
-                    else getattr(coordinator.settings, "anagrafica_group_id", 0))
+        group_id = getattr(coordinator.settings, "anagrafica_group_id", 0)
         if group_id:
             if (getattr(chat, "id", None) != group_id
                     or chat.type not in {"group", "supergroup"}

@@ -229,23 +229,43 @@ class CommandTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("IN PAUSA", u.effective_message.reply_text.call_args.args[0])
         self.assertIn("già una richiesta", v.effective_message.reply_text.call_args.args[0])
 
-    async def test_manual_job_asks_admin_privately_even_with_apprentice_enabled(self):
+    async def test_manual_job_uses_apprentice_group_and_checks_reply_identity(self):
         c = self.coordinator
         c.settings.spreadsheet_id = "queuebook"
         c.settings.anagrafica_group_id = -100111
+        c.settings.anagrafica_bot_id = 12345
         r = worker.QueueRequest(2,"manual", "ATTESA_ANAGRAFICA", "queuebook", worker.MANUAL_SHEET,2,3,"Giovanni Carlo De Luca")
         c.active = r
         c.personal_name_parts = ("Giovanni Carlo", "De Luca")
         c.personal_future = asyncio.get_running_loop().create_future()
         task = asyncio.create_task(c.request_personal_data(r))
         await c.personal_prompt_ready.wait()
-        u = self.update(text="01/01/2000 | M | Roma (RM)")
-        u.effective_message.chat = SimpleNamespace(id=99)
-        u.effective_message.delete = AsyncMock()
-        await worker.text_handler(u,self.context)
+        prompt = self.bot.send_message.call_args_list[0].kwargs
+        self.assertEqual(prompt["chat_id"], -100111)
+        self.assertIn("@Apprendista_Mugnaio_bot", prompt["text"])
+        self.assertIn("ID richiesta: manual", prompt["text"])
+        def reply(user=12345, chat=-100111, kind="supergroup", is_bot=True, prompt_id=None):
+            u = self.update(user=user, chat=chat, kind=kind, text="01/01/2000 | M | Roma (RM)")
+            u.effective_user.is_bot = is_bot
+            m = u.effective_message
+            m.message_id = 10
+            m.chat = SimpleNamespace(id=chat)
+            m.delete = AsyncMock()
+            m.reply_to_message = SimpleNamespace(message_id=c.personal_prompt_id if prompt_id is None else prompt_id)
+            return u
+        for u in (reply(user=99,chat=99,kind="private",is_bot=False),
+                  reply(chat=-100222), reply(user=54321), reply(is_bot=False), reply(prompt_id=-1)):
+            await worker.text_handler(u,self.context)
+            self.assertFalse(c.personal_future.done())
+        forwarded = reply()
+        forwarded.effective_message.forward_origin = object()
+        await worker.text_handler(forwarded,self.context)
+        self.assertFalse(c.personal_future.done())
+        await worker.text_handler(reply(),self.context)
         p = await asyncio.wait_for(task, 1)
         self.assertEqual((p.first_name,p.last_name), ("Giovanni Carlo","De Luca"))
-        self.assertEqual(self.bot.send_message.call_args_list[0].kwargs["chat_id"],99)
+        self.assertTrue(any("Dati ricevuti dall'Apprendista" in x.kwargs.get("text", "")
+                            for x in self.bot.send_message.call_args_list))
 
     async def test_full_ordinary_completion_saves_email_notifies_admin_and_credits_once(self):
         c = self.coordinator
