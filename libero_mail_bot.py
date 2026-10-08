@@ -225,6 +225,21 @@ def normalize_ascii(value: str) -> str:
     return "".join(char for char in decomposed if not unicodedata.combining(char))
 
 
+def libero_personal_name(value: str) -> str:
+    """Adatta solo il campo del sito; conserva i dati originali della richiesta."""
+    value = normalize_ascii(value).translate(str.maketrans({
+        "’": "'", "‘": "'", "ʼ": "'", "＇": "'",
+        "‐": "-", "‑": "-", "–": "-", "—": "-",
+    }))
+    value = normalize_spaces(value)
+    if not value or not re.fullmatch(r"[A-Za-z '-]+", value) or not re.search(r"[A-Za-z]", value):
+        raise RegistrationError(
+            "Nome o cognome contiene caratteri non supportati dal modulo Libero. "
+            "Correggi i dati anagrafici prima di riprovare."
+        )
+    return value
+
+
 def normalize_phone(value: str) -> str:
     raw = str(value or "").strip()
     plus = raw.startswith("+")
@@ -1013,9 +1028,9 @@ class RegistrationBrowser:
         self.stage = "verifica di sicurezza prima dei dati anagrafici"
         await self._handle_captcha_if_needed(request)
         self.stage = "compilazione del nome"
-        await self.page.locator("#firstname").fill(personal.first_name)
+        await self.page.locator("#firstname").fill(libero_personal_name(personal.first_name))
         self.stage = "compilazione del cognome"
-        await self.page.locator("#lastname").fill(personal.last_name)
+        await self.page.locator("#lastname").fill(libero_personal_name(personal.last_name))
         self.stage = "compilazione della data di nascita"
         birth = self.page.locator("#dateofbirth")
         birth_type = (await birth.get_attribute("type") or "text").lower()
@@ -1047,7 +1062,39 @@ class RegistrationBrowser:
 
         await self._handle_captcha_if_needed(request)
         self.stage = "pulsante Avanti delle informazioni personali"
+        await self._raise_if_personal_data_invalid()
         await self._click_and_wait_for_change("#button_submit")
+        await self._raise_if_personal_data_invalid()
+
+    async def _raise_if_personal_data_invalid(self) -> None:
+        """Riconosce il rifiuto del modulo senza riportare valori personali."""
+        assert self.page
+        parsed = urlsplit(self.page.url)
+        if parsed.scheme != "https" or parsed.hostname != "registrazione.libero.it":
+            return
+        if not await self._personal_data_page_ready():
+            return
+        for selector, label in (("#firstname", "nome"), ("#lastname", "cognome"),
+                                ("#dateofbirth", "data di nascita"),
+                                ("#comune_provincia", "comune di residenza")):
+            field = self.page.locator(selector)
+            if await field.count() and await field.is_visible():
+                invalid = await field.evaluate("""(el) =>
+                    el.getAttribute('aria-invalid') === 'true' ||
+                    el.classList.contains('is-invalid') ||
+                    (el.validity && !el.validity.valid)""")
+                if invalid:
+                    raise RegistrationError(
+                        f"Libero ha rifiutato il campo {label} delle informazioni personali. "
+                        "Correggi i dati prima di riprovare."
+                    )
+        error = self.page.get_by_text(re.compile(r"Presenza di caratteri non validi", re.I))
+        for candidate in await error.all():
+            if await candidate.is_visible():
+                raise RegistrationError(
+                    "Libero segnala caratteri non validi nelle informazioni personali. "
+                    "Correggi i dati prima di riprovare."
+                )
 
     async def _select_gender(self, gender: str) -> None:
         """Seleziona l'etichetta visibile dei radio personalizzati, se presente."""

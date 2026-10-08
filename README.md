@@ -10,6 +10,15 @@ si installa nella sottocartella `app`. Non sostituire il tuo `.env` con
 
 ## Cosa fa
 
+### Caratteri dei dati anagrafici: v1.3.14
+
+Solo i campi nome e cognome inviati a Libero vengono adattati: accenti rimossi,
+apostrofi tipografici convertiti nell’apostrofo semplice e trattini tipografici
+convertiti nel trattino semplice. Nomi originali nei fogli e nelle richieste
+invariati. Caratteri senza conversione sicura vengono segnalati, mai eliminati
+silenziosamente. Gli errori espliciti del modulo personale vengono riconosciuti
+prima e dopo Avanti, senza riportare valori personali o continuare al passo finale.
+
 ### CAPTCHA già completato al primo invio: v1.3.13
 
 L’avanzamento iniziale automatico ora considera anche il CAPTCHA completato
