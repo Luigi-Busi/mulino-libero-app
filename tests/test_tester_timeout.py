@@ -105,10 +105,13 @@ class TesterTimeoutTests(unittest.IsolatedAsyncioTestCase):
     async def test_timeout_waits_for_inflight_resend_without_second_click(self):
         await self.assigned()
         c = self.coordinator
-        c.tester_sms_deadline = asyncio.get_running_loop().time() + .03
+        c.tester_sms_deadline = asyncio.get_running_loop().time() + 300
         c.resend_event.set()
         async def slow_resend():
-            await asyncio.sleep(.06)
+            self.assertTrue(c.resend_busy)
+            # Expire only after the resend has started; no millisecond scheduling race.
+            c.tester_sms_deadline = asyncio.get_running_loop().time() - 1
+            await asyncio.sleep(0)
             await worker.text_handler(self.make_update(11, "private"), self.context)
         resend = AsyncMock(side_effect=slow_resend)
         with self.assertRaises(worker.TesterChangeRequested):
