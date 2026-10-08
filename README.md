@@ -10,6 +10,20 @@ si installa nella sottocartella `app`. Non sostituire il tuo `.env` con
 
 ## Cosa fa
 
+### Avanti dopo il CAPTCHA iniziale: v1.3.10
+
+Se il CAPTCHA richiesto dal primo Avanti viene completato manualmente e
+l’username resta valido, il bot preme automaticamente Avanti una sola volta
+per aprire Nome e Cognome. Servono un segnale esplicito di completamento,
+la stessa pagina iniziale di Libero, credenziali immutate e il pulsante
+Avanti/Continua previsto, disponibile e cliccabile. La scomparsa del widget
+non basta. Se il sito è già avanzato o richiede un altro username si segue
+il normale percorso, senza ulteriori clic. Un CAPTCHA già completato prima
+del primo invio non provoca un secondo invio automatico. Se il clic ha esito
+incerto, la sessione resta aperta senza ripeterlo. La conferma amministrativa
+e Registrati nelle pagine successive restano invariati.
+
+
 ### Attesa dopo rifiuto temporaneo di Libero: v1.3.9
 
 Il messaggio visibile di attività anomala con invito a riprovare tra alcuni minuti

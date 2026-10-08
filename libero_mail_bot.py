@@ -912,16 +912,72 @@ class RegistrationBrowser:
             return False
         return await self.page.locator("#lastname").is_visible()
 
+    async def _initial_captcha_advance_ready(
+        self, starting_url: str, expected_username: str, expected_password: str
+    ) -> bool:
+        """Only advance the initial form after an observed human CAPTCHA completion."""
+        assert self.page
+        await self._check_cancelled()
+        await self._raise_if_provider_blocked()
+        before, after = urlsplit(starting_url), urlsplit(self.page.url)
+        if (after.scheme != "https" or after.hostname != "registrazione.libero.it"
+                or (before.hostname, before.path) != (after.hostname, after.path)):
+            return False
+        if await self._personal_data_page_ready() or await self._username_unavailable():
+            return False
+        username, password = self.page.locator("#username"), self.page.locator("#password")
+        if (not await username.is_visible() or not await password.is_visible()
+                or not expected_username or not expected_password
+                or await username.input_value() != expected_username
+                or await password.input_value() != expected_password
+                or not await self._captcha_completed()):
+            return False
+        buttons = self.page.get_by_role("button", name=re.compile(r"^(?:Avanti|Continua)$", re.I))
+        if await buttons.count() != 1:
+            return False
+        button = buttons.first
+        if (await button.get_attribute("id") != "button_submit"
+                or not await button.is_visible() or not await button.is_enabled()):
+            return False
+        try:
+            await button.click(trial=True, timeout=1_000)
+        except PlaywrightTimeoutError:
+            return False
+        return True
+
     async def _open_personal_data_page(self, request: QueueRequest) -> bool:
+        assert self.page
+        starting_url = self.page.url
+        expected_username = await self.page.locator("#username").input_value()
+        expected_password = await self.page.locator("#password").input_value()
+        captcha_was_complete = await self._captcha_completed()
+        auto_advanced = False
         self.stage = "gestione dei cookie prima del passaggio alle informazioni personali"
         await self._dismiss_cookie_banner()
         self.stage = "passaggio alle informazioni personali"
         try:
             await self._click_and_wait_for_change("#button_submit")
         except PlaywrightTimeoutError:
-            # Un banner può coprire Avanti; la sessione resta a disposizione
-            # dell'amministratore, senza ricaricare o chiudere la pagina.
-            pass
+            pass  # Banner o CAPTCHA: conservare la sessione per l'intervento umano.
+
+        async def initial_ready() -> bool:
+            nonlocal auto_advanced
+            await self._check_cancelled()
+            if await self._initial_page_outcome_ready():
+                return True
+            if (not captcha_was_complete and not auto_advanced
+                    and await self._initial_captcha_advance_ready(
+                        starting_url, expected_username, expected_password)):
+                # Mark before the click: an uncertain response must never repeat it.
+                auto_advanced = True
+                await self._check_cancelled()
+                self.stage = "Avanti dopo il CAPTCHA completato manualmente"
+                try:
+                    await self._click_and_wait_for_change("#button_submit")
+                except PlaywrightTimeoutError:
+                    pass
+                return await self._initial_page_outcome_ready()
+            return False
 
         while not await self._personal_data_page_ready():
             await self._check_cancelled()
@@ -932,16 +988,18 @@ class RegistrationBrowser:
                 request,
                 instructions=(
                     "🧩 Libero è ancora al primo passaggio. Il browser resta aperto.\n\n"
-                    "Nel browser remoto gestisci il banner cookie, risolvi l'eventuale "
-                    "CAPTCHA e premi Avanti fino a vedere i campi Nome e Cognome.\n\n"
+                    "Nel browser remoto gestisci il banner cookie e risolvi l'eventuale CAPTCHA. "
+                    "Quando ne rilevo il completamento premo Avanti una volta, se l'username "
+                    "è valido e i campi iniziali non sono cambiati.\n\n"
                     "Non modificare manualmente il nome utente: se occupato, "
                     "provo automaticamente un’alternativa @libero.it. "
                     "Quando compaiono Nome e Cognome riprendo automaticamente: "
                     "non serve confermare su Telegram. "
+                    "Se resto in attesa o non riesco a premere Avanti, puoi premerlo nel browser. "
                     "Se il sito mostra un errore, mandane uno screenshot all'assistente. "
                     "Puoi interrompere la richiesta con /annulla."
                 ),
-                ready_check=self._initial_page_outcome_ready,
+                ready_check=initial_ready,
             )
             await self._check_cancelled()
             await self.coordinator.set_queue_fields(
