@@ -10,6 +10,19 @@ si installa nella sottocartella `app`. Non sostituire il tuo `.env` con
 
 ## Cosa fa
 
+### Verifica asincrona dopo CAPTCHA: v1.3.16
+
+Il sito riesegue la verifica username dopo il CAPTCHA umano. Il clic iniziale
+aggiuntivo aspetta la fine delle richieste jQuery, nessun errore nei campi e
+condizioni stabili per tre secondi. Consente solo equivalenze fra i percorsi
+pubblici iniziali /, /join.phtml e /join1.phtml con stessi campi e credenziali.
+Il limite resta un solo Avanti aggiuntivo; nessun invio forzato o nuovo tentativo
+quando la risposta è incerta. Diagnostica MULINO_CAPTCHA_STATE con soli codici,
+ID tecnico della sessione e sequenza (massimo 80 eventi); non include URL, valori,
+HTML, token, credenziali o testo delle eccezioni. Osserva passivamente se il clic
+è annullato dal sito o parte un POST di navigazione. Questi eventi si consultano
+nei log del contenitore attivo; il raccoglitore storico precedente li ignora.
+
 ### Avvisi di esito da verificare: v1.3.15
 
 I nuovi messaggi «Esito della registrazione Libero da verificare» in privato

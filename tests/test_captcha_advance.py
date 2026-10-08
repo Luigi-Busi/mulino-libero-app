@@ -10,7 +10,7 @@ class InitialCaptchaTests(unittest.IsolatedAsyncioTestCase):
     asyncSetUp = browser_fixtures.BrowserFormTests.asyncSetUp
     asyncTearDown = browser_fixtures.BrowserFormTests.asyncTearDown
 
-    async def initial_form(self, *, navigate=True, complete=False, label='Avanti'):
+    async def initial_form(self, *, navigate=True, complete=False, label='Avanti', skip_stability=True):
         html = """<input id="username" value="fixture.user"><input id="password" type="password" value="fixture-password">
           <textarea name="g-recaptcha-response" style="display:none">TOKEN</textarea>
           <div class="g-recaptcha" style="height:50px">Verifica manuale</div>
@@ -28,6 +28,15 @@ class InitialCaptchaTests(unittest.IsolatedAsyncioTestCase):
             return await self.page.locator('#firstname').is_visible() and await self.page.locator('#lastname').is_visible()
         self.b._personal_data_page_ready = personal_ready
         self.c.set_queue_fields = AsyncMock()
+        if skip_stability:
+            actual = self.b._initial_captcha_advance_ready
+            async def stable(*args):
+                ready = await actual(*args)
+                if not ready and self.b._captcha_diag_last == 'stabilizing':
+                    self.b._captcha_ready_since -= 4
+                    return await actual(*args)
+                return ready
+            self.b._initial_captcha_advance_ready = stable
 
     async def complete_human_fixture(self):
         await self.page.evaluate("document.querySelector('[name=g-recaptcha-response]').value='fixture-complete'")

@@ -927,38 +927,131 @@ class RegistrationBrowser:
             return False
         return await self.page.locator("#lastname").is_visible()
 
+    def _initial_captcha_diagnostic(self, code: str) -> None:
+        allowed = {'path_blocked', 'page_advanced', 'fields_changed', 'captcha_pending',
+                   'validation_pending', 'field_error', 'button_blocked', 'stabilizing',
+                   'ready', 'click_attempt', 'click_cancelled', 'submit_cancelled',
+                   'post_started', 'click_no_submit', 'click_unknown', 'attempt_used'}
+        if code not in allowed or getattr(self, '_captcha_diag_last', None) == code:
+            return
+        count = getattr(self, '_captcha_diag_count', 0)
+        if count >= 80:
+            return
+        self._captcha_diag_last, self._captcha_diag_count = code, count + 1
+        # No URLs, HTML, names, credentials, CAPTCHA responses or exception text.
+        LOGGER.info('MULINO_CAPTCHA_STATE %s', json.dumps({
+            'schema': 1, 'session': self.diagnostics.session if self.diagnostics else 'test',
+            'state': code, 'seq': count + 1}, separators=(',', ':')))
+
     async def _initial_captcha_advance_ready(
         self, starting_url: str, expected_username: str, expected_password: str
     ) -> bool:
-        """Only advance the initial form after an observed human CAPTCHA completion."""
+        """Wait for Libero's async username check after human CAPTCHA completion."""
         assert self.page
         await self._check_cancelled()
         await self._raise_if_provider_blocked()
+        def blocked(code):
+            self._captcha_ready_since = None
+            self._initial_captcha_diagnostic(code)
+            return False
         before, after = urlsplit(starting_url), urlsplit(self.page.url)
-        if (after.scheme != "https" or after.hostname != "registrazione.libero.it"
-                or (before.hostname, before.path) != (after.hostname, after.path)):
-            return False
+        initial_paths = {'/', '/join.phtml', '/join1.phtml'}
+        if (after.scheme != 'https' or after.hostname != 'registrazione.libero.it'
+                or before.hostname != after.hostname
+                or not (before.path == after.path
+                        or {before.path, after.path} <= initial_paths)):
+            return blocked('path_blocked')
         if await self._personal_data_page_ready() or await self._username_unavailable():
-            return False
-        username, password = self.page.locator("#username"), self.page.locator("#password")
+            return blocked('page_advanced')
+        username, password = self.page.locator('#username'), self.page.locator('#password')
         if (not await username.is_visible() or not await password.is_visible()
                 or not expected_username or not expected_password
                 or await username.input_value() != expected_username
-                or await password.input_value() != expected_password
-                or not await self._captcha_completed()):
-            return False
-        buttons = self.page.get_by_role("button", name=re.compile(r"^(?:Avanti|Continua)$", re.I))
+                or await password.input_value() != expected_password):
+            return blocked('fields_changed')
+        if not await self._captcha_completed():
+            return blocked('captcha_pending')
+        pending = await self.page.evaluate("""() => Boolean(
+            window.jQuery && typeof window.jQuery.active === 'number' && window.jQuery.active > 0
+        )""")
+        if pending:
+            return blocked('validation_pending')
+        for field in (username, password):
+            invalid = await field.evaluate("""el =>
+                (el.validity && !el.validity.valid) || el.getAttribute('aria-invalid') === 'true' ||
+                el.classList.contains('invalid') || el.classList.contains('is-invalid')""")
+            if invalid:
+                return blocked('field_error')
+        for selector in ('#username_error', '#password_error'):
+            if await self.page.locator(selector).is_visible():
+                return blocked('field_error')
+        buttons = self.page.get_by_role('button', name=re.compile(r'^(?:Avanti|Continua)$', re.I))
         if await buttons.count() != 1:
-            return False
+            return blocked('button_blocked')
         button = buttons.first
-        if (await button.get_attribute("id") != "button_submit"
+        if (await button.get_attribute('id') != 'button_submit'
                 or not await button.is_visible() or not await button.is_enabled()):
-            return False
+            return blocked('button_blocked')
         try:
             await button.click(trial=True, timeout=1_000)
         except PlaywrightTimeoutError:
+            return blocked('button_blocked')
+        now = time.monotonic()
+        since = getattr(self, '_captcha_ready_since', None)
+        if since is None:
+            self._captcha_ready_since = now
+            self._initial_captcha_diagnostic('stabilizing')
             return False
+        if now - since < 3:
+            return False
+        self._initial_captcha_diagnostic('ready')
         return True
+
+    async def _click_initial_captcha_advance(self) -> None:
+        """Observe whether the ordinary click submitted; never force or repeat it."""
+        assert self.page
+        post_started = False
+        def observed(request):
+            nonlocal post_started
+            if (request.is_navigation_request() and request.frame == self.page.main_frame
+                    and request.method == 'POST'):
+                post_started = True
+        self.page.on('request', observed)
+        try:
+            # Passive event observation only. Never call submit(), site validators or CAPTCHA APIs.
+            try:
+                await self.page.locator('#button_submit').evaluate("""button => {
+                    const state = {click: false, cancelled: false, submit: false, submitCancelled: false};
+                    button.__mulinoClickObservation = state;
+                    button.addEventListener('click', event => {
+                        state.click = true;
+                        setTimeout(() => state.cancelled = event.defaultPrevented, 0);
+                    }, {once: true, capture: true});
+                    if (button.form) button.form.addEventListener('submit', event => {
+                        state.submit = true;
+                        setTimeout(() => state.submitCancelled = event.defaultPrevented, 0);
+                    }, {once: true, capture: true});
+                }""")
+            except PlaywrightError:
+                pass  # Diagnostic failure never changes the ordinary click.
+            self._initial_captcha_diagnostic('click_attempt')
+            try:
+                await self._click_and_wait_for_change('#button_submit')
+            except PlaywrightTimeoutError:
+                pass
+            try:
+                if post_started:
+                    result = 'post_started'
+                else:
+                    state = await self.page.locator('#button_submit').evaluate('el => el.__mulinoClickObservation', timeout=1_000)
+                    result = ('click_cancelled' if state and state.get('cancelled') else
+                              'submit_cancelled' if state and state.get('submitCancelled') else
+                              'click_no_submit' if state and state.get('click') else 'click_unknown')
+                self._initial_captcha_diagnostic(result)
+            except PlaywrightError:
+                self._initial_captcha_diagnostic('click_unknown')
+        finally:
+            self.page.remove_listener('request', observed)
 
     async def _open_personal_data_page(self, request: QueueRequest) -> bool:
         assert self.page
@@ -966,6 +1059,7 @@ class RegistrationBrowser:
         expected_username = await self.page.locator("#username").input_value()
         expected_password = await self.page.locator("#password").input_value()
         auto_advanced = False
+        self._captcha_ready_since = None
         self.stage = "gestione dei cookie prima del passaggio alle informazioni personali"
         await self._dismiss_cookie_banner()
         self.stage = "passaggio alle informazioni personali"
@@ -986,11 +1080,10 @@ class RegistrationBrowser:
                 auto_advanced = True
                 await self._check_cancelled()
                 self.stage = "Avanti dopo il CAPTCHA completato manualmente"
-                try:
-                    await self._click_and_wait_for_change("#button_submit")
-                except PlaywrightTimeoutError:
-                    pass
+                await self._click_initial_captcha_advance()
                 return await self._initial_page_outcome_ready()
+            if auto_advanced:
+                self._initial_captcha_diagnostic('attempt_used')
             return False
 
         while not await self._personal_data_page_ready():
