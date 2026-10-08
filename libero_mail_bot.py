@@ -3754,6 +3754,20 @@ def admin_command(callback):
     return wrapped
 
 
+async def short_notice_reply(coordinator: Coordinator, source: Any, text: str) -> Any:
+    """Expire only an explicitly delivered private administrative acknowledgement."""
+    sent = await source.reply_text(text)
+    try:
+        if getattr(getattr(sent, "chat", None), "id", None) == coordinator.settings.admin_id:
+            # A separate random batch isolates this notice from recovery-list cleanup.
+            coordinator.panel.cleanup.track_recovery(
+                getattr(coordinator.bot, "id", None), getattr(sent, "message_id", None),
+                secrets.token_hex(8), "usage", delete_after=300)
+    except (sqlite3.Error, ValueError):
+        LOGGER.warning("Avviso inviato; scadenza della pulizia non registrata")
+    return sent
+
+
 async def manual_mail_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     coordinator: Coordinator = context.application.bot_data["coordinator"]
     user, chat, message = update.effective_user, update.effective_chat, update.effective_message
@@ -3791,7 +3805,7 @@ async def manual_mail_command(update: Update, context: ContextTypes.DEFAULT_TYPE
                 f"ID: {request.request_id}\nStato: {request.status}\n"
                 "Attendi il completamento; se è fallita o annullata verifica prima l'esito con /recupera.")
         return
-    await message.reply_text(f"📬 Richiesta manuale accodata.\nID: {request.request_id}\n"
+    await short_notice_reply(coordinator, message, f"📬 Richiesta manuale accodata.\nID: {request.request_id}\n"
         "Userò la procedura e la password già configurate. Chiederò i dati anagrafici nel gruppo all’Apprendista "
         "e ti comunicherò in privato la mail al completamento.\n" + coordinator.queue_status_text())
 
@@ -4292,9 +4306,11 @@ async def recovery_callback_locked(update: Update, context: ContextTypes.DEFAULT
             if result:
                 clear_recovery_ignore(coordinator, request.request_id)
                 await finish_recovery(coordinator, item.get("batch", ""))
-            await query.message.reply_text(("✅ Richiesta rimessa in coda."
-                + (" La coda e in pausa: partira dopo /riprendi." if coordinator.paused else "")) if result else
-                "Stato cambiato: richiesta non riavviata. Usa /recupera.")
+            if result:
+                await short_notice_reply(coordinator, query.message, "✅ Richiesta rimessa in coda."
+                    + (" La coda e in pausa: partira dopo /riprendi." if coordinator.paused else ""))
+            else:
+                await query.message.reply_text("Stato cambiato: richiesta non riavviata. Usa /recupera.")
         elif action in {"created", "created_yes"}:
             current, username, email = await asyncio.to_thread(
                 coordinator.store.existing_created_details, request.request_id)
@@ -4510,7 +4526,7 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.effective_message.reply_text("Nessuna registrazione attiva.")
         return
     coordinator.cancel_event.set()
-    await update.effective_message.reply_text("Richiesta annullata.")
+    await short_notice_reply(coordinator, update.effective_message, "Richiesta annullata.")
 
 
 async def retry_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -4537,11 +4553,11 @@ async def retry_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     result = await asyncio.to_thread(coordinator.store.retry, request_id)
     if result:
         clear_recovery_ignore(coordinator, request_id)
-    await update.effective_message.reply_text(
-        ("✅ Richiesta rimessa in coda."
-         + (" La coda e in pausa: partira dopo /riprendi." if coordinator.paused else ""))
-        if result else "Richiesta non trovata o già chiusa."
-    )
+    if result:
+        await short_notice_reply(coordinator, update.effective_message, "✅ Richiesta rimessa in coda."
+            + (" La coda e in pausa: partira dopo /riprendi." if coordinator.paused else ""))
+    else:
+        await update.effective_message.reply_text("Richiesta non trovata o già chiusa.")
 
 
 async def confirm_created_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

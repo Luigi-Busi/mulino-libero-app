@@ -86,6 +86,19 @@ class RecoveryCleanupAgeTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 db.close()
 
+    async def test_five_minute_notice_survives_restart_and_does_not_remove_other_replies(self):
+        self.c.track_recovery(7,40,BATCH,'usage',delete_after=300)
+        self.c.track_recovery(7,41,'b'*16,'usage')
+        self.c = AdminChatCleanup(self.db,99)
+        with patch('telegram_panel.time.time',return_value=NOW+299):
+            await self.c.drain(self.bot,None)
+        self.bot.delete_message.assert_not_awaited()
+        with patch('telegram_panel.time.time',return_value=NOW+300):
+            await self.c.drain(self.bot,None)
+        self.assertEqual([x.kwargs['message_id'] for x in self.bot.delete_message.call_args_list],[40])
+        self.assertEqual(self.db.execute('SELECT message FROM admin_recovery_messages').fetchall(),[(41,)])
+
+
 
 class RecoveryFlowTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
@@ -277,3 +290,37 @@ class RecoveryFlowTests(unittest.IsolatedAsyncioTestCase):
             await self.click('retry',rid='fixture-0')
         self.store.retry.assert_not_called()
         self.assertFalse(self.deleted())
+
+    async def test_requested_success_notices_expire_but_retry_errors_remain(self):
+        with patch('telegram_panel.time.time',return_value=NOW):
+            self.store.create_manual_request=Mock(return_value=(self.requests[0],'',True))
+            self.source.text='/creamail Mario | Rossi'
+            await worker.manual_mail_command(self.u,self.context)
+            self.c.active=self.requests[0]
+            await worker.cancel_command(self.u,self.context)
+            self.c.active=None
+            self.context.args=['fixture-0']
+            await worker.retry_command(self.u,self.context)
+            notice_ids=[m.message_id for m in self.sent]
+            self.store.retry.return_value=False
+            await worker.retry_command(self.u,self.context)
+            error=self.sent[-1].message_id
+        rows=self.c.outcomes.db.execute('SELECT message,delete_at-sent_at FROM admin_recovery_messages ORDER BY message').fetchall()
+        self.assertEqual(rows,[(mid,300) for mid in notice_ids])
+        with patch('telegram_panel.time.time',return_value=NOW+300):
+            await self.c.panel.cleanup.drain(self.bot,None)
+        self.assertEqual(self.deleted(),notice_ids)
+        self.assertNotIn(error,self.deleted())
+
+    async def test_recovery_success_notice_has_own_five_minute_batch(self):
+        with patch('telegram_panel.time.time',return_value=NOW):
+            await self.listing()
+            await self.click('retry',rid='fixture-0')
+            await self.click('retry_yes',rid='fixture-0')
+            notice=self.sent[-1].message_id
+        row=self.c.outcomes.db.execute('SELECT delete_at-sent_at FROM admin_recovery_messages WHERE message=?',(notice,)).fetchone()
+        self.assertEqual(row,(300,))
+        self.assertNotIn(notice,self.deleted())
+        with patch('telegram_panel.time.time',return_value=NOW+300):
+            await self.c.panel.cleanup.drain(self.bot,None)
+        self.assertIn(notice,self.deleted())

@@ -10,6 +10,18 @@ si installa nella sottocartella `app`. Non sostituire il tuo `.env` con
 
 ## Cosa fa
 
+### Conferme amministrative temporanee: v1.3.11
+
+In privato, i nuovi avvisi Richiesta manuale accodata, Richiesta annullata e
+Richiesta rimessa in coda scadono dopo cinque minuti, anche quando sono
+l’ultimo avviso. La scadenza è salvata nel registro esistente e continua
+dopo i riavvii. La pulizia avviene al primo passaggio del ciclo successivo
+alla scadenza; se Telegram non risponde viene ritentata. Sono incluse le
+riprese tramite /riprova e i pulsanti /recupera. Errori, esiti con la mail
+creata e messaggi operativi non ricevono questa scadenza. Gli avvisi già
+inviati prima dell’aggiornamento non vengono ricercati nella cronologia.
+
+
 ### Avanti dopo il CAPTCHA iniziale: v1.3.10
 
 Se il CAPTCHA richiesto dal primo Avanti viene completato manualmente e

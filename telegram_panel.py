@@ -139,14 +139,16 @@ class AdminChatCleanup:
             return False
         return True
 
-    def track_recovery(self, bot, message, batch, kind):
+    def track_recovery(self, bot, message, batch, kind, *, delete_after=None):
         if (not all(self.valid_id(v) for v in (self.owner, bot, message))
                 or not isinstance(batch, str) or not re.fullmatch(r'[0-9a-f]{16}', batch)
-                or kind not in ('list', 'confirm', 'usage')):
+                or kind not in ('list', 'confirm', 'usage')
+                or (delete_after is not None and (kind != 'usage' or type(delete_after) is not int or delete_after != 300))):
             raise ValueError('Invalid recovery metadata')
         now = int(time.time())
+        delay = (delete_after if delete_after is not None else 1800) if kind == 'usage' else 0
         self.db.execute('INSERT OR IGNORE INTO admin_recovery_messages VALUES (?,?,?,?,?,?,?)',
-            (self.owner, bot, message, batch, kind, now, now + 1800 if kind == 'usage' else 0))
+            (self.owner, bot, message, batch, kind, now, now + delay if delay else 0))
 
     def finish_recovery(self, bot, batch, *, message=None):
         if not self.valid_id(bot) or not isinstance(batch, str) or not re.fullmatch(r'[0-9a-f]{16}', batch):
