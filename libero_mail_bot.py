@@ -950,7 +950,6 @@ class RegistrationBrowser:
         starting_url = self.page.url
         expected_username = await self.page.locator("#username").input_value()
         expected_password = await self.page.locator("#password").input_value()
-        captcha_was_complete = await self._captcha_completed()
         auto_advanced = False
         self.stage = "gestione dei cookie prima del passaggio alle informazioni personali"
         await self._dismiss_cookie_banner()
@@ -965,7 +964,7 @@ class RegistrationBrowser:
             await self._check_cancelled()
             if await self._initial_page_outcome_ready():
                 return True
-            if (not captcha_was_complete and not auto_advanced
+            if (not auto_advanced
                     and await self._initial_captcha_advance_ready(
                         starting_url, expected_username, expected_password)):
                 # Mark before the click: an uncertain response must never repeat it.

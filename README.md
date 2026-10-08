@@ -10,6 +10,15 @@ si installa nella sottocartella `app`. Non sostituire il tuo `.env` con
 
 ## Cosa fa
 
+### CAPTCHA già completato al primo invio: v1.3.12
+
+L’avanzamento iniziale automatico ora considera anche il CAPTCHA completato
+prima del primo Avanti. Se il sito resta sul modulo iniziale con username
+valido, campi invariati e CAPTCHA ancora completato, il bot può premere
+Avanti una sola volta aggiuntiva. Una risposta incerta non provoca altri
+clic; le altre condizioni di sicurezza e la conferma finale restano uguali.
+
+
 ### Conferme amministrative temporanee: v1.3.11
 
 In privato, i nuovi avvisi Richiesta manuale accodata, Richiesta annullata e
@@ -30,8 +39,8 @@ per aprire Nome e Cognome. Servono un segnale esplicito di completamento,
 la stessa pagina iniziale di Libero, credenziali immutate e il pulsante
 Avanti/Continua previsto, disponibile e cliccabile. La scomparsa del widget
 non basta. Se il sito è già avanzato o richiede un altro username si segue
-il normale percorso, senza ulteriori clic. Un CAPTCHA già completato prima
-del primo invio non provoca un secondo invio automatico. Se il clic ha esito
+il normale percorso, senza ulteriori clic. Il CAPTCHA completato prima del primo invio è ora gestito dalla v1.3.12
+con un solo Avanti aggiuntivo, se il modulo iniziale resta invariato. Se il clic ha esito
 incerto, la sessione resta aperta senza ripeterlo. La conferma amministrativa
 e Registrati nelle pagine successive restano invariati.
 

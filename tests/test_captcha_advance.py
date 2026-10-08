@@ -100,15 +100,25 @@ class InitialCaptchaTests(unittest.IsolatedAsyncioTestCase):
                 await self.b._open_personal_data_page(object())
             self.assertEqual(await self.page.evaluate('window.clicks'),1)
 
-    async def test_already_completed_captcha_does_not_resubmit_first_click(self):
+    async def test_captcha_completed_before_first_click_still_advances_when_initial_form_remains(self):
+        await self.initial_form(complete=True)
+        async def waiting(request, *, ready_check, **kwargs):
+            self.assertTrue(await ready_check())
+            self.assertTrue(await ready_check())
+        self.c.wait_for_manual_captcha.side_effect = waiting
+        self.assertTrue(await self.b._open_personal_data_page(object()))
+        self.assertEqual(await self.page.evaluate('window.clicks'),2)
+
+    async def test_already_completed_captcha_and_uncertain_advance_never_clicks_repeatedly(self):
         await self.initial_form(complete=True,navigate=False)
         async def waiting(request, *, ready_check, **kwargs):
-            self.assertFalse(await ready_check())
+            for _ in range(4):
+                self.assertFalse(await ready_check())
             raise worker.RequestCancelled('end fixture')
         self.c.wait_for_manual_captcha.side_effect = waiting
         with self.assertRaises(worker.RequestCancelled):
             await self.b._open_personal_data_page(object())
-        self.assertEqual(await self.page.evaluate('window.clicks'),1)
+        self.assertEqual(await self.page.evaluate('window.clicks'),2)
 
     async def test_disabled_button_waits_until_enabled_and_clicks_once(self):
         await self.initial_form()
