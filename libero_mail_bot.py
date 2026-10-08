@@ -931,7 +931,8 @@ class RegistrationBrowser:
         allowed = {'path_blocked', 'page_advanced', 'fields_changed', 'captcha_pending',
                    'validation_pending', 'field_error', 'button_blocked', 'stabilizing',
                    'ready', 'click_attempt', 'click_cancelled', 'submit_cancelled',
-                   'post_started', 'click_no_submit', 'click_unknown', 'attempt_used'}
+                   'post_started', 'click_no_submit', 'click_unknown', 'attempt_used',
+                   'safe_retry_available', 'safe_retry_blocked', 'safe_retry_used'}
         if code not in allowed or getattr(self, '_captcha_diag_last', None) == code:
             return
         count = getattr(self, '_captcha_diag_count', 0)
@@ -1007,10 +1008,20 @@ class RegistrationBrowser:
         self._initial_captcha_diagnostic('ready')
         return True
 
-    async def _click_initial_captcha_advance(self) -> None:
+    async def _click_initial_captcha_advance(self, *, retry: bool = False) -> None:
         """Observe whether the ordinary click submitted; never force or repeat it."""
         assert self.page
+        if retry and not await self._initial_cancelled_click_retry_ready():
+            return
         post_started = False
+        self._initial_retry_proof = None
+        posts_before = getattr(self, '_initial_posts', None)
+        navigation_before = getattr(self, '_initial_navigations', None)
+        document_before = None
+        try:
+            document_before = await self.page.evaluate('performance.timeOrigin')
+        except PlaywrightError:
+            pass
         def observed(request):
             nonlocal post_started
             if (request.is_navigation_request() and request.frame == self.page.main_frame
@@ -1021,7 +1032,12 @@ class RegistrationBrowser:
             # Passive event observation only. Never call submit(), site validators or CAPTCHA APIs.
             try:
                 await self.page.locator('#button_submit').evaluate("""button => {
-                    const state = {click: false, cancelled: false, submit: false, submitCancelled: false};
+                    const form = button.form;
+                    const action = form ? new URL(form.action, location.href) : null;
+                    const state = {click: false, cancelled: false, submit: false, submitCancelled: false,
+                        trustedForm: Boolean(form && form.id === 'userdata' && form.method.toLowerCase() === 'post'
+                            && action.protocol === 'https:' && action.hostname === 'registrazione.libero.it'
+                            && action.pathname === '/check1.php')};
                     button.__mulinoClickObservation = state;
                     button.addEventListener('click', event => {
                         state.click = true;
@@ -1048,17 +1064,65 @@ class RegistrationBrowser:
                               'submit_cancelled' if state and state.get('submitCancelled') else
                               'click_no_submit' if state and state.get('click') else 'click_unknown')
                 self._initial_captcha_diagnostic(result)
+                if (result == 'click_cancelled' and state and state.get('trustedForm')
+                        and not state.get('submit') and posts_before is not None
+                        and posts_before == self._initial_posts
+                        and navigation_before == self._initial_navigations
+                        and document_before is not None
+                        and await self.page.evaluate('performance.timeOrigin') == document_before):
+                    self._initial_retry_proof = (posts_before, navigation_before, document_before)
+                    self._initial_captcha_diagnostic('safe_retry_available')
             except PlaywrightError:
                 self._initial_captcha_diagnostic('click_unknown')
         finally:
             self.page.remove_listener('request', observed)
 
+    async def _initial_cancelled_click_retry_ready(self) -> bool:
+        assert self.page
+        proof = getattr(self, '_initial_retry_proof', None)
+        if not proof:
+            return False
+        posts, navigations, document = proof
+        try:
+            valid = (posts == self._initial_posts and navigations == self._initial_navigations
+                     and document == await self.page.evaluate('performance.timeOrigin'))
+        except PlaywrightError:
+            valid = False
+        if not valid:
+            self._initial_retry_proof = None
+            self._initial_captcha_diagnostic('safe_retry_blocked')
+        return valid
+
     async def _open_personal_data_page(self, request: QueueRequest) -> bool:
+        assert self.page
+        self._initial_posts = self._initial_navigations = 0
+        self._initial_retry_proof = None
+        def request_seen(event):
+            try:
+                if event.method == 'POST' and event.frame == self.page.main_frame:
+                    self._initial_posts += 1
+            except PlaywrightError:
+                self._initial_retry_proof = None
+                self._initial_posts += 1  # Any uncertainty prohibits a retry.
+        def navigated(frame):
+            if frame == self.page.main_frame:
+                self._initial_navigations += 1
+        self.page.on('request', request_seen)
+        self.page.on('framenavigated', navigated)
+        try:
+            return await self._open_personal_data_page_observed(request)
+        finally:
+            self.page.remove_listener('request', request_seen)
+            self.page.remove_listener('framenavigated', navigated)
+            self._initial_retry_proof = None
+
+    async def _open_personal_data_page_observed(self, request: QueueRequest) -> bool:
         assert self.page
         starting_url = self.page.url
         expected_username = await self.page.locator("#username").input_value()
         expected_password = await self.page.locator("#password").input_value()
         auto_advanced = False
+        safe_retry_used = False
         self._captcha_ready_since = None
         self.stage = "gestione dei cookie prima del passaggio alle informazioni personali"
         await self._dismiss_cookie_banner()
@@ -1069,18 +1133,24 @@ class RegistrationBrowser:
             pass  # Banner o CAPTCHA: conservare la sessione per l'intervento umano.
 
         async def initial_ready() -> bool:
-            nonlocal auto_advanced
+            nonlocal auto_advanced, safe_retry_used
             await self._check_cancelled()
             if await self._initial_page_outcome_ready():
                 return True
-            if (not auto_advanced
+            retry = (auto_advanced and not safe_retry_used
+                     and await self._initial_cancelled_click_retry_ready())
+            if ((not auto_advanced or retry)
                     and await self._initial_captcha_advance_ready(
                         starting_url, expected_username, expected_password)):
-                # Mark before the click: an uncertain response must never repeat it.
+                if retry:
+                    safe_retry_used = True
+                    self._initial_captcha_diagnostic('safe_retry_used')
+                # Mark before the click. Only a proven client cancellation can be retried once.
                 auto_advanced = True
                 await self._check_cancelled()
                 self.stage = "Avanti dopo il CAPTCHA completato manualmente"
-                await self._click_initial_captcha_advance()
+                await self._click_initial_captcha_advance(retry=retry)
+                self._captcha_ready_since = None
                 return await self._initial_page_outcome_ready()
             if auto_advanced:
                 self._initial_captcha_diagnostic('attempt_used')

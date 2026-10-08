@@ -10,6 +10,18 @@ si installa nella sottocartella `app`. Non sostituire il tuo `.env` con
 
 ## Cosa fa
 
+### Clic iniziale annullato dal sito: v1.3.17
+
+Dopo l’Avanti aggiuntivo, un solo nuovo tentativo è ammesso quando il sito ha
+annullato l’evento click prima del submit, nel form userdata POST /check1.php,
+senza POST di navigazione né cambio documento. Gli osservatori restano attivi
+per tutta l’attesa iniziale: un POST o una navigazione successivi invalidano
+la prova. Il tentativo ripassa tutte le protezioni (stessa pagina/credenziali,
+CAPTCHA umano completo, validazione finita, campi validi e pulsante pronto)
+e aspetta nuovamente tre secondi di stabilità. Totale massimo due clic aggiuntivi.
+Una risposta incerta, un submit annullato dopo l’evento submit o un invio partito
+non consentono ripetizioni. Nessun submit forzato o clic finale Registrati.
+
 ### Verifica asincrona dopo CAPTCHA: v1.3.16
 
 Il sito riesegue la verifica username dopo il CAPTCHA umano. Il clic iniziale
