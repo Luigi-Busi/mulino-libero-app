@@ -90,6 +90,10 @@ class AdminChatCleanup:
             batch TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('list','confirm','usage')),
             sent_at INTEGER NOT NULL, delete_at INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY(owner,bot,message))""")
+        db.execute("""CREATE TABLE IF NOT EXISTS admin_registration_notice_history (
+            owner INTEGER NOT NULL, bot INTEGER NOT NULL, message INTEGER NOT NULL,
+            sent_at INTEGER NOT NULL CHECK(sent_at>0),
+            PRIMARY KEY(owner,bot,message))""")
         self.lock = asyncio.Lock()
         self.retry_at = 0.0
 
@@ -111,6 +115,14 @@ class AdminChatCleanup:
             raise ValueError('Invalid response metadata')
         self.db.execute('INSERT OR IGNORE INTO admin_response_history VALUES (?,?,?,?,?)',
                         (self.owner, bot, message, 'queue', sent_at))
+
+    def track_registration_notice(self, bot, message, sent_at):
+        """Only delivered uncertain-registration notices; no text or request data."""
+        if (not all(self.valid_id(v) for v in (self.owner, bot, message))
+                or type(sent_at) is not int or not 0 < sent_at <= time.time() + 60):
+            raise ValueError('Invalid registration notice metadata')
+        self.db.execute('INSERT OR IGNORE INTO admin_registration_notice_history VALUES (?,?,?,?)',
+                        (self.owner, bot, message, sent_at))
 
     async def delete_known(self, bot, message):
         """True means removed or permanently unavailable; False keeps the durable job."""
@@ -202,6 +214,25 @@ class AdminChatCleanup:
                     # Expired metadata cannot be used to delete Telegram history older than 48h.
                     # A restored current-panel pointer is protected even if it was tracked wrongly.
                     self.db.execute('DELETE FROM admin_response_history WHERE owner=? AND bot=? AND message=?',
+                                    (self.owner,bot.id,message))
+                # Independent category: keep the latest uncertain-registration notice.
+                rows = self.db.execute('''SELECT message,sent_at FROM admin_registration_notice_history
+                    WHERE owner=? AND bot=? AND sent_at<=?
+                    AND message < (SELECT MAX(message) FROM admin_registration_notice_history
+                        WHERE owner=? AND bot=?)
+                    ORDER BY sent_at,message LIMIT 8''',
+                    (self.owner,bot.id,now-43200,self.owner,bot.id)).fetchall()
+                for message, sent_at in rows:
+                    current = current_message() if callable(current_message) else current_message
+                    latest = self.db.execute('''SELECT MAX(message) FROM admin_registration_notice_history
+                        WHERE owner=? AND bot=?''',(self.owner,bot.id)).fetchone()[0]
+                    if message == latest:
+                        continue
+                    if (self.valid_id(message) and message != current
+                            and now - 172800 < sent_at <= now - 43200):
+                        if not await self.delete_known(bot, message):
+                            return
+                    self.db.execute('DELETE FROM admin_registration_notice_history WHERE owner=? AND bot=? AND message=?',
                                     (self.owner,bot.id,message))
                 # Only observed recovery messages; no chat history scan or message text.
                 self.db.execute('DELETE FROM admin_recovery_messages WHERE owner=? AND bot=? AND sent_at<=?',

@@ -3048,7 +3048,7 @@ class Coordinator:
                     ERRORE=error_text[:500],
                     NOTE="Verificare se la casella esiste; usare /recupera prima di riprovare",
                 )
-            await self.bot.send_message(
+            sent = await self.bot.send_message(
                 chat_id=self.settings.admin_id,
                 text=(
                     "⚠️ Esito della registrazione Libero da verificare\n\n"
@@ -3059,6 +3059,7 @@ class Coordinator:
                     "Ripeti la registrazione solo se la casella non è stata creata."
                 ),
             )
+            self.track_registration_notice(sent)
         finally:
             self.personal_future = None
             self.personal_name_parts = None
@@ -3085,6 +3086,22 @@ class Coordinator:
                     "⏸ La richiesta e terminata. La coda resta in pausa. "
                     + ("Ora puoi aggiornare il programma; al termine usa /riprendi."
                        if self.pause_persisted else "La pausa non e salvata: riprova /pausa prima di riavviare."))
+
+    def track_registration_notice(self, sent) -> None:
+        """Register only this successfully sent admin notice; never scan chat history."""
+        date = getattr(sent, 'date', None)
+        if not (getattr(sent, 'chat', None)
+                and sent.chat.id == self.settings.admin_id
+                and getattr(sent.chat, 'type', None) == ChatType.PRIVATE
+                and getattr(sent, 'from_user', None) and sent.from_user.id == self.bot.id
+                and isinstance(date, datetime) and date.tzinfo is not None):
+            return
+        try:
+            self.panel.cleanup.track_registration_notice(
+                self.bot.id, getattr(sent, 'message_id', None), int(date.timestamp()))
+        except (sqlite3.Error, ValueError, OverflowError):
+            # Delivery and error recording succeeded; never resend or restart the request.
+            LOGGER.warning('Avviso esito inviato; registrazione della pulizia non disponibile')
 
     async def request_personal_data(self, request: QueueRequest) -> PersonalData:
         self.personal_prompt_id = None

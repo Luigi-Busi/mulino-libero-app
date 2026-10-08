@@ -10,6 +10,17 @@ si installa nella sottocartella `app`. Non sostituire il tuo `.env` con
 
 ## Cosa fa
 
+### Avvisi di esito da verificare: v1.3.15
+
+I nuovi messaggi «Esito della registrazione Libero da verificare» in privato
+all’amministratore vengono tracciati in una categoria separata. Dopo dodici
+ore i precedenti vengono eliminati; il più recente rimane sempre, anche se
+più vecchio. Le altre categorie, gli esiti positivi e le richieste recuperabili
+restano invariati. Il tracciamento conserva solo ID e data del messaggio,
+persiste ai riavvii e usa le protezioni della pulizia esistente. I vecchi avvisi
+non tracciati non vengono cercati nella chat. La nuova tabella SQLite è additiva;
+le versioni precedenti possono ignorarla senza modifiche ai dati esistenti.
+
 ### Caratteri dei dati anagrafici: v1.3.14
 
 Solo i campi nome e cognome inviati a Libero vengono adattati: accenti rimossi,
