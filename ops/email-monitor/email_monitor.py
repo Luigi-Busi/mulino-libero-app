@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only document-request monitor. No email bodies or secrets in state/logs."""
+"""Read-only mail monitor. Keeps selected verification URLs, never mail bodies."""
 from __future__ import annotations
 import argparse
 import collections
@@ -7,7 +7,10 @@ import contextlib
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from email import policy
-from email.parser import BytesHeaderParser
+from email.parser import BytesHeaderParser, BytesParser
+from html import unescape
+from html.parser import HTMLParser
+from urllib.parse import urlsplit, parse_qsl
 from email.utils import getaddresses, parsedate_to_datetime
 import fcntl
 import hashlib
@@ -24,7 +27,7 @@ import time
 import unicodedata
 from zoneinfo import ZoneInfo
 
-VERSION = '1.3.2'
+VERSION = '1.4.0'
 RULES = {
  'sisal': ('info@sisal.it', "inviaci la copia del tuo documento d'identità"),
  'pokerstars': ('info@clienti.pokerstars.it', "inviaci il tuo documento d'identità"),
@@ -174,6 +177,60 @@ class SheetsSource:
    report[source['sheet']]={**dict(stat),'colors':dict(colors)}
   return accounts, report
 
+VERIFICATION_HOSTS={'sisal':{'areaprivata.sisal.it'},'pokerstars':{'areaprivata-pokerstars.sisal.it'}}
+
+def safe_verification_url(value,operator=None):
+ if not isinstance(value,str):return None
+ value=unescape(value.strip())
+ if not value or len(value)>2048 or any(ord(c)<=32 or ord(c)==127 for c in value):return None
+ try:
+  parsed=urlsplit(value)
+  hosts=VERIFICATION_HOSTS.get(operator,set()) if operator else set().union(*VERIFICATION_HOSTS.values())
+  if parsed.scheme!='https' or parsed.hostname not in hosts or parsed.username is not None or parsed.password is not None or parsed.port not in [None,443] or parsed.fragment:return None
+  params=parse_qsl(parsed.query,keep_blank_values=True)
+  identifiers=[v for k,v in params if k=='ic'];selfies=[v for k,v in params if k=='selfie']
+  if len(identifiers)!=1 or not identifiers[0] or len(selfies)!=1:return None
+ except (ValueError,UnicodeError):return None
+ return value
+
+class VerificationAnchors(HTMLParser):
+ def __init__(self):super().__init__(convert_charrefs=True);self.links=[]
+ def handle_starttag(self,tag,attrs):
+  if tag.casefold()=='a':
+   for key,value in attrs:
+    if key.casefold()=='href' and value:self.links.append(value)
+
+def extract_verification_link(raw,operator):
+ if len(raw)>524288:return {'status':'too_large'}
+ try:
+  message=BytesParser(policy=policy.default).parsebytes(raw);candidates=set();had_error=False
+  for index,part in enumerate(message.walk()):
+   if index>50:break
+   if part.get_content_disposition()=='attachment' or part.get_filename() or part.get_content_type() not in ['text/plain','text/html']:continue
+   try:
+    content=part.get_content()
+    if part.get_content_type()=='text/html':
+     parser=VerificationAnchors();parser.feed(content);links=parser.links
+    else:links=re.findall(r'https://[^\s<>"\')]+',content)
+    for link in links:
+     value=safe_verification_url(link,operator)
+     if value:candidates.add(value)
+   except (ValueError,LookupError,UnicodeError,TypeError):had_error=True
+  if len(candidates)==1:return {'status':'found','url':next(iter(candidates))}
+  return {'status':'ambiguous' if candidates else 'unreadable' if had_error else 'missing'}
+ except Exception:return {'status':'unreadable'}
+
+def document_event(email,operator,raw,received):
+ message=BytesHeaderParser(policy=policy.default).parsebytes(raw)
+ subject=str(message.get('Subject',''))
+ addresses=getaddresses([str(h) for h in message.get_all('From',[])])
+ if len(addresses)!=1 or not allowed_sender(operator,addresses[0][1]) or normalized(RULES[operator][1]) not in normalized(subject):return None
+ mid=str(message.get('Message-ID','')).strip()
+ fingerprint=mid if mid else hashlib.sha256(raw+received.encode()).hexdigest()
+ key=hashlib.sha256((email+'\n'+operator+'\n'+fingerprint).encode()).hexdigest()
+ return key,subject
+
+
 class State:
  def __init__(self, path):
   Path(path).parent.mkdir(parents=True,exist_ok=True)
@@ -216,20 +273,21 @@ class State:
  def advance(self,email,operator,folder,generation,validity,uid):
   self.db.execute('INSERT OR REPLACE INTO cursors VALUES(?,?,?,?,?,?,?)',(email,operator,folder,generation,validity,uid,now()))
 
- def enqueue(self,email,operator,raw,received):
-  message=BytesHeaderParser(policy=policy.default).parsebytes(raw)
-  subject=str(message.get('Subject',''))
-  addresses=getaddresses([str(h) for h in message.get_all('From',[])])
-  if len(addresses)!=1:return False
-  sender,phrase=RULES[operator]
-  if not allowed_sender(operator,addresses[0][1]) or normalized(phrase) not in normalized(subject):return False
-  mid=str(message.get('Message-ID','')).strip()
-  fingerprint=mid if mid else hashlib.sha256(raw+received.encode()).hexdigest()
-  key=hashlib.sha256((email+'\n'+operator+'\n'+fingerprint).encode()).hexdigest()
-  stamp=now()
-  # Payload excludes bodies, credentials and account passwords.
+ def enqueue(self,email,operator,raw,received,verification=None):
+  metadata=document_event(email,operator,raw,received)
+  if metadata is None:return False
+  key,subject=metadata;stamp=now()
   cur=self.db.execute('INSERT OR IGNORE INTO events(event_key,email,operator,subject,received,created,updated) VALUES(?,?,?,?,?,?,?)',(key,email,operator,subject[:1000],received,stamp,stamp))
+  if cur.rowcount:
+   result=verification or {'status':'missing'}
+   url=safe_verification_url(result.get('url',''),operator)
+   payload={'status':'found','url':url} if url else {'status':result.get('status','missing')}
+   self.db.execute('INSERT OR REPLACE INTO settings VALUES(?,?)',('verification_link:'+key,json.dumps(payload)))
   return cur.rowcount==1
+
+ def verification(self,event_key):
+  row=self.db.execute('SELECT value FROM settings WHERE key=?',('verification_link:'+event_key,)).fetchone()
+  return json.loads(row[0]) if row else {'status':'missing'}
 
  def status(self):
   return {'subscriptions':self.db.execute('SELECT COUNT(*) FROM subscriptions WHERE active=1').fetchone()[0],
@@ -343,10 +401,35 @@ class Scanner:
    match=re.search(rb'INTERNALDATE "([^"\r\n]+)"',metadata)
    if not match:raise ValueError('INTERNALDATE absent')
    received=match[1].decode('ascii')
+   candidates=[]
+   for operator,(_,cursor_uid) in tracked.items():
+    if uid<=cursor_uid:continue
+    item=document_event(email,operator,raw,received)
+    if item and not self.state.db.execute('SELECT 1 FROM events WHERE event_key=?',(item[0],)).fetchone():candidates.append(operator)
+   verification={}
+   if candidates:
+    typ,body_data=conn.uid('FETCH',str(uid),'(UID RFC822.SIZE BODY.PEEK[]<0.524288>)')
+    if typ!='OK':raise RuntimeError('Verification body FETCH failed')
+    literals=[item for item in body_data if isinstance(item,tuple) and isinstance(item[1],bytes)]
+    if not literals:verification={op:{'status':'unavailable'} for op in candidates}
+    else:
+     if len(literals)!=1:raise ValueError('Unexpected verification body response')
+     body_meta,body=literals[0];actual=re.search(rb'\bUID (\d+)\b',body_meta)
+     if not actual or int(actual[1])!=uid:raise ValueError('Verification UID mismatch')
+     size=re.search(rb'RFC822\.SIZE (\d+)',body_meta)
+     if (size and int(size[1])>524288) or len(body)>=524288:verification={op:{'status':'too_large'} for op in candidates}
+     else:
+      original=BytesHeaderParser(policy=policy.default).parsebytes(raw)
+      full=BytesHeaderParser(policy=policy.default).parsebytes(body)
+      if str(full.get('Message-ID','')).strip()!=str(original.get('Message-ID','')).strip() or normalized(str(full.get('Subject','')))!=normalized(str(original.get('Subject',''))):raise ValueError('Verification message mismatch')
+      for operator in candidates:
+       if document_event(email,operator,body,received) is None:raise ValueError('Verification sender mismatch')
+       verification[operator]=extract_verification_link(body,operator)
+     stats['verification_bodies']+=1
    with self.state.db:
     for operator,(generation,cursor_uid) in tracked.items():
      if uid>cursor_uid:
-      if self.state.enqueue(email,operator,raw,received):stats['candidates']+=1
+      if self.state.enqueue(email,operator,raw,received,verification.get(operator)):stats['candidates']+=1
       self.state.advance(email,operator,folder,generation,validity,uid)
    stats['headers']+=1
   with self.state.db:
@@ -400,21 +483,25 @@ def display_date(received):
   return dt.astimezone(ZoneInfo('Europe/Rome')).strftime('%d/%m/%Y, %H:%M')
  except ValueError:return received
 
-def notification(event,accounts,reactivation=False):
+def notification(event,accounts,reactivation=False,verification=None):
  title='✅ Account riattivato' if reactivation else '🚨 Richiesta documento'
  text=f"{title} — {LABELS[event['operator']]}\n"
  text+=f"Account: {accounts[0].name[:160]}\nEmail: {event['email']}\nOggetto: {event['subject'][:500]}\nRicevuta: {display_date(event['received'])}\n"
- text+='\n'.join(f'Apri {a.sheet}: {a.url}' for a in accounts[:4])
+ if reactivation:text+='\n'.join(f'Apri {a.sheet}: {a.url}' for a in accounts[:4])
+ elif verification and safe_verification_url(verification.get('url',''),event['operator']):text+='\nApri la verifica documenti con il pulsante qui sotto.'
+ else:text+='\nLink di verifica non disponibile o non riconoscibile: consulta direttamente la mail.'
  return text[:3800]
 
 class Telegram:
  def __init__(self,config):
   import requests
   self.session=requests.Session();self.token=Path(config['telegram_token_file']).read_text().strip();self.chat=config['telegram_chat_id'];self.dashboard_button=False;self.dashboard_target=config.get('dashboard_status',{})
- def send(self,text):
+ def send(self,text,verification_url=None):
   # No requests logging / raise_for_status: URLs contain the secret token.
   try:
    payload={'chat_id':self.chat,'text':text,'link_preview_options':{'is_disabled':True}}
+   url=safe_verification_url(verification_url or '')
+   if url:payload['reply_markup']={'inline_keyboard':[[{'text':'Apri verifica documenti','url':url}]]}
    response=self.session.post(f'https://api.telegram.org/bot{self.token}/sendMessage',json=payload,timeout=(10,30))
   except Exception:return ('uncertain',None,0,'NETWORK_UNCERTAIN')
   try:body=response.json()
@@ -455,7 +542,10 @@ def deliver(state,accounts,sender,reactivation=False):
   # Claim before the network call. A process crash leaves an explicit uncertain
   # delivery, rather than silently repeating a Telegram notification.
   with state.db:state.db.execute(f"UPDATE {table} SET status='sending',attempts=attempts+1,updated=? WHERE event_key=?",(now(),event['event_key']))
-  result,mid,delay,error=sender.send(notification(event,targets,reactivation))
+  verification=None if reactivation else state.verification(event['event_key'])
+  url=None if reactivation else safe_verification_url(verification.get('url',''),event['operator'])
+  text=notification(event,targets,reactivation,verification)
+  result,mid,delay,error=sender.send(text,verification_url=url) if url else sender.send(text)
   stamp=now()
   with state.db:
    state.db.execute(f'UPDATE {table} SET status=?,telegram_message_id=?,next_try=?,error=?,updated=? WHERE event_key=?',(result,mid,time.time()+delay,error,stamp,event['event_key']))

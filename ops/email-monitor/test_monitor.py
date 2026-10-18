@@ -101,7 +101,7 @@ class StateTest(unittest.TestCase):
   self.assertEqual(self.state.status()['delivery'],{'sending':1})
  def test_message_date_italian_timezone(self):self.assertEqual(m.display_date('02-Oct-2026 12:30:00 +0000'),'02/10/2026, 14:30')
  def test_message_has_link_without_password(self):
-  self.event();event=self.state.db.execute('SELECT * FROM events').fetchone();text=m.notification(event,[ACCOUNT]);self.assertIn('range=G12:H12',text);self.assertNotIn('test-password',text)
+  self.event();event=self.state.db.execute('SELECT * FROM events').fetchone();text=m.notification(event,[ACCOUNT]);self.assertNotIn('docs.google.com',text);self.assertIn('Link di verifica non disponibile',text);self.assertNotIn('test-password',text)
  def test_disabled_folder_not_scanned(self):
   conn=FakeIMAP(folders=[b'() "/" INBOX',b'(\\Sent) "/" outbox',b'(\\Trash) "/" trash',b'(\\Junk) "/" Spam']);self.scan(conn)
   self.assertEqual([c[1] for c in conn.calls if c[0]=='SELECT'],['"INBOX"','"Spam"'])
@@ -488,5 +488,118 @@ class SegretarioSplitTest(unittest.TestCase):
   with patch('requests.post',return_value=response):m.publish_dashboard({'dashboard_status':{'webhook_file':str(path)}},self.state)
   first=json.loads(self.state.db.execute("SELECT value FROM settings WHERE key='banco_chat_snapshot'").fetchone()[0]);second=json.loads(self.state.db.execute("SELECT value FROM settings WHERE key='segretario_chat_snapshot'").fetchone()[0])
   self.assertEqual(first['state']['panel'],55);self.assertEqual(second['state']['panel'],66);self.assertNotIn('SECRET',json.dumps(second))
+
+SISAL_LINK='https://areaprivata.sisal.it/area/verifica?ic=FAKE_ACCOUNT_TOKEN&selfie=1'
+PS_LINK='https://areaprivata-pokerstars.sisal.it/area/verifica?ic=FAKE_POKERSTARS_TOKEN&selfie=1'
+
+def link_mail(operator='sisal',link=SISAL_LINK,html=True,mid='<verification@test>',extra=''):
+ from email.message import EmailMessage
+ msg=EmailMessage();msg['From']=m.RULES[operator][0];msg['Subject']=m.RULES[operator][1];msg['Message-ID']=mid
+ msg.set_content('Mail di richiesta documento.' if html else 'Apri verifica: '+link)
+ if html:msg.add_alternative('<html><a href="https://www.sisal.it">Home</a><a href="'+link.replace('&','&amp;')+'"><img alt="Verifica documento" src="image.png"></a>'+extra+'</html>',subtype='html')
+ return msg.as_bytes()
+
+class VerificationParserTest(unittest.TestCase):
+ def test_sisal_anchor_and_html_entities_preserve_exact_link(self):
+  self.assertEqual(m.extract_verification_link(link_mail(),'sisal'),{'status':'found','url':SISAL_LINK})
+ def test_pokerstars_image_button_uses_its_distinct_domain(self):
+  self.assertEqual(m.extract_verification_link(link_mail('pokerstars',PS_LINK),'pokerstars')['url'],PS_LINK)
+ def test_plain_text_link_is_supported(self):
+  self.assertEqual(m.extract_verification_link(link_mail(html=False),'sisal')['url'],SISAL_LINK)
+ def test_repeated_same_link_is_not_ambiguous(self):
+  body=link_mail(extra='<a href="'+SISAL_LINK.replace('&','&amp;')+'">Ancora</a>')
+  self.assertEqual(m.extract_verification_link(body,'sisal')['url'],SISAL_LINK)
+ def test_two_different_valid_links_require_manual_check(self):
+  body=link_mail(extra='<a href="'+SISAL_LINK.replace('FAKE_ACCOUNT_TOKEN','OTHER_FAKE_TOKEN').replace('&','&amp;')+'">Altro</a>')
+  self.assertEqual(m.extract_verification_link(body,'sisal'),{'status':'ambiguous'})
+ def test_wrong_operator_domain_is_not_forwarded(self):
+  self.assertEqual(m.extract_verification_link(link_mail('sisal',PS_LINK),'sisal'),{'status':'missing'})
+ def test_unrelated_password_and_home_links_are_ignored(self):
+  body=link_mail(link='https://areaprivata.sisal.it/account/password')
+  self.assertEqual(m.extract_verification_link(body,'sisal'),{'status':'missing'})
+ def test_lookalike_hosts_http_credentials_and_duplicate_ids_rejected(self):
+  bad=[SISAL_LINK.replace('areaprivata.sisal.it','areaprivata.sisal.it.evil.invalid'),SISAL_LINK.replace('https:','http:'),SISAL_LINK.replace('https://','https://user:pass@'),SISAL_LINK+'&ic=SECOND',SISAL_LINK+'#fragment',SISAL_LINK.replace('https://','javascript://'),SISAL_LINK+'\nextra']
+  for value in bad:self.assertIsNone(m.safe_verification_url(value,'sisal'))
+ def test_missing_account_identifier_and_unrelated_domains_rejected(self):
+  for value in ['https://areaprivata.sisal.it/?selfie=1','https://areaprivata.sisal.it/?ic=&selfie=1','https://areaprivata.sisal.it/?ic=FAKE','https://example.org/?ic=FAKE&selfie=1']:self.assertIsNone(m.safe_verification_url(value,'sisal'))
+ def test_attached_html_is_not_used_as_the_mail_action(self):
+  from email.message import EmailMessage
+  msg=EmailMessage();msg.set_content('Nessun link nella mail');msg.add_attachment(('<a href="'+SISAL_LINK+'">Verifica</a>').encode(),maintype='text',subtype='html',filename='other.html')
+  self.assertEqual(m.extract_verification_link(msg.as_bytes(),'sisal'),{'status':'missing'})
+ def test_oversized_body_does_not_get_parsed(self):
+  self.assertEqual(m.extract_verification_link(b'x'*524289,'sisal'),{'status':'too_large'})
+ def test_oversized_link_does_not_get_forwarded(self):self.assertIsNone(m.safe_verification_url(SISAL_LINK+'x'*2048,'sisal'))
+
+class VerificationFlowTest(unittest.TestCase):
+ setUp=StateTest.setUp
+ tearDown=StateTest.tearDown
+ scan=StateTest.scan
+ baseline=StateTest.baseline
+ def sender(self):
+  sender=Mock();sender.send.return_value=('sent',55,0,None);return sender
+ def conn(self,body=None):return FakeIMAP(uidnext=7,messages={6:body or link_mail()},folders=[b'() "/" INBOX'])
+ def event(self,body=None):
+  self.baseline();stats,errors=self.scan(self.conn(body));self.assertFalse(errors);return self.state.db.execute('SELECT * FROM events').fetchone(),stats
+ def test_scanner_reads_body_only_for_new_matching_document_requests(self):
+  self.baseline();conn=self.conn(raw(sender='other@example.org'));self.scan(conn)
+  self.assertFalse(any(c[0]=='FETCH' and 'BODY.PEEK[]' in c[-1] for c in conn.calls))
+  conn=self.conn();stats,errors=self.scan(conn)
+  # Previous UID was consumed because it was unrelated; use a new UID.
+  conn.uidnext=8;conn.messages={7:link_mail()};stats,errors=self.scan(conn)
+  self.assertFalse(errors);self.assertEqual(stats['verification_bodies'],1)
+ def test_matching_body_read_uses_peek_and_bounded_size(self):
+  self.baseline();conn=self.conn();self.scan(conn)
+  body_calls=[c for c in conn.calls if c[0]=='FETCH' and 'BODY.PEEK[]' in c[-1]]
+  self.assertEqual(len(body_calls),1);self.assertIn('<0.524288>',body_calls[0][-1])
+ def test_link_is_durable_without_storing_mail_body(self):
+  event,_=self.event();self.state.db.close();self.state=m.State(Path(self.temp.name)/'state.sqlite3')
+  self.assertEqual(self.state.verification(event['event_key'])['url'],SISAL_LINK)
+  saved=' '.join(r[0] for r in self.state.db.execute('SELECT value FROM settings'))
+  self.assertNotIn('Mail di richiesta documento.',saved);self.assertNotIn('<html>',saved)
+  self.assertNotIn('FAKE_ACCOUNT_TOKEN',json.dumps(self.state.status()))
+ def test_duplicate_message_across_folders_fetches_body_once(self):
+  conn=FakeIMAP();self.scan(conn);conn.uidnext=7;conn.messages={6:link_mail()};self.scan(conn)
+  self.assertEqual(sum(c[0]=='FETCH' and 'BODY.PEEK[]' in c[-1] for c in conn.calls),1)
+  self.assertEqual(self.state.db.execute('SELECT COUNT(*) FROM events').fetchone()[0],1)
+ def test_transient_body_fetch_error_retries_without_advancing_cursor(self):
+  self.baseline();conn=self.conn();original=conn.uid
+  conn.uid=lambda command,*args:('NO',[]) if command=='FETCH' and 'BODY.PEEK[]' in args[-1] else original(command,*args)
+  _,errors=self.scan(conn);self.assertTrue(errors);self.assertEqual(self.state.cursor(ACCOUNT.email,'sisal','INBOX')['uid'],5)
+  self.assertEqual(self.state.db.execute('SELECT COUNT(*) FROM events').fetchone()[0],0)
+  conn.uid=original;_,errors=self.scan(conn);self.assertFalse(errors);self.assertEqual(self.state.db.execute('SELECT COUNT(*) FROM events').fetchone()[0],1)
+ def test_wrong_body_uid_is_not_attached_to_the_account(self):
+  self.baseline();conn=self.conn();original=conn.uid
+  def fetch(command,*args):
+   typ,data=original(command,*args)
+   if command=='FETCH' and 'BODY.PEEK[]' in args[-1]:data=[(data[0][0].replace(b'UID 6',b'UID 99'),data[0][1]),b')']
+   return typ,data
+  conn.uid=fetch;_,errors=self.scan(conn);self.assertTrue(errors);self.assertEqual(self.state.db.execute('SELECT COUNT(*) FROM events').fetchone()[0],0)
+ def test_body_identity_mismatch_is_retried_without_wrong_link(self):
+  self.baseline();conn=self.conn();original=conn.uid
+  def fetch(command,*args):
+   typ,data=original(command,*args)
+   if command=='FETCH' and 'BODY.PEEK[]' in args[-1]:data=[(data[0][0],link_mail(mid='<other@test>')),b')']
+   return typ,data
+  conn.uid=fetch;_,errors=self.scan(conn);self.assertTrue(errors);self.assertEqual(self.state.cursor(ACCOUNT.email,'sisal','INBOX')['uid'],5)
+ def test_document_delivery_uses_link_button_instead_of_sheet_link(self):
+  event,_=self.event();sender=self.sender();m.deliver(self.state,[ACCOUNT],sender)
+  self.assertEqual(sender.send.call_args.kwargs,{'verification_url':SISAL_LINK})
+  self.assertNotIn('docs.google.com',sender.send.call_args.args[0]);self.assertNotIn('FAKE_ACCOUNT_TOKEN',sender.send.call_args.args[0])
+  self.assertEqual(self.state.db.execute('SELECT status FROM events').fetchone()[0],'sent')
+  self.assertEqual(self.state.db.execute('SELECT COUNT(*) FROM followups').fetchone()[0],1)
+  m.deliver(self.state,[ACCOUNT],sender);sender.send.assert_called_once()
+ def test_missing_link_still_notifies_explicitly_without_sheet_link(self):
+  event,_=self.event(raw());sender=self.sender();m.deliver(self.state,[ACCOUNT],sender)
+  self.assertIn('Link di verifica non disponibile',sender.send.call_args.args[0]);self.assertNotIn('docs.google.com',sender.send.call_args.args[0]);self.assertEqual(sender.send.call_args.kwargs,{})
+ def test_telegram_receives_exact_url_only_as_expected_button(self):
+  sender=object.__new__(m.Telegram);sender.token='TEST';sender.chat=1;sender.session=Mock();sender.restore_panel=Mock()
+  response=sender.session.post.return_value;response.status_code=200;response.json.return_value={'ok':True,'result':{'message_id':55}}
+  self.assertEqual(sender.send('Avviso',verification_url=SISAL_LINK),('sent',55,0,None))
+  payload=sender.session.post.call_args.kwargs['json'];self.assertEqual(payload['reply_markup']['inline_keyboard'],[[{'text':'Apri verifica documenti','url':SISAL_LINK}]])
+  self.assertTrue(payload['link_preview_options']['is_disabled']);sender.restore_panel.assert_called_once_with(55)
+ def test_invalid_link_cannot_be_forwarded_by_telegram_sender(self):
+  sender=object.__new__(m.Telegram);sender.token='TEST';sender.chat=1;sender.session=Mock();sender.restore_panel=Mock()
+  response=sender.session.post.return_value;response.status_code=200;response.json.return_value={'ok':True,'result':{'message_id':55}}
+  sender.send('Avviso',verification_url='https://evil.invalid/?ic=X&selfie=1');self.assertNotIn('reply_markup',sender.session.post.call_args.kwargs['json'])
 
 if __name__=='__main__':unittest.main(verbosity=2)

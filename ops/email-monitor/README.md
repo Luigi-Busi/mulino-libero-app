@@ -207,3 +207,22 @@ per documenti sia per riattivazioni. L'importazione storica è un intervento
 una tantum riservato alle due caselle segnalate, con metadati verificati;
 non sposta i cursori del controllo ordinario. Le notifiche importate passano
 per il normale registro di consegna, aprendo l'attesa dal mattino successivo.
+
+
+## Monitor 1.4.0 — verification links in document request notices
+
+New matching Sisal and PokerStars document requests retrieve a bounded MIME
+body with BODY.PEEK only after sender and subject match. A single HTTPS URL on
+the observed operator verification host, with account/selfie parameters, is
+retained as optional event metadata in the existing settings table. Bodies and
+URLs are excluded from status/log output. Missing, oversized or ambiguous links
+produce an explicit fallback notice without a sheet-row link. Transient body
+fetch failures keep the cursor boundary for retry. Notification delivery and
+next-morning reactivation waits retain the existing event identity and ledger.
+
+Il Banco sends an Open verification button instead of the document request's
+sheet-row URL. Reactivation notices and Il Segretario remain unchanged. Existing
+events are not replayed or backfilled. Settings metadata is compatible with
+rollback to 1.3.2; database schema, mail rules and operating hours are unchanged.
+144 isolated Python tests and read-only extraction from actual Sisal/PokerStars
+messages passed. Real verification links were not opened or printed.
