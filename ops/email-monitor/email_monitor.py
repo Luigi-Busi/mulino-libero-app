@@ -24,7 +24,7 @@ import time
 import unicodedata
 from zoneinfo import ZoneInfo
 
-VERSION = '1.3.0'
+VERSION = '1.3.1'
 RULES = {
  'sisal': ('info@sisal.it', "inviaci la copia del tuo documento d'identità"),
  'pokerstars': ('info@clienti.pokerstars.it', "inviaci il tuo documento d'identità"),
@@ -587,7 +587,29 @@ def health_text(summary):
  lines.append('Il monitor riproverà al prossimo ciclo. Le credenziali non sono incluse nel messaggio.')
  return '\n'.join(lines)
 
+def register_health_notices(config,state):
+ target=config.get('dashboard_status',{})
+ if not target.get('webhook_file'):return
+ row=state.db.execute("SELECT value FROM settings WHERE key='health_notice_outbox'").fetchone()
+ pending=json.loads(row[0]) if row else []
+ if not pending:return
+ remaining=[]
+ for notice in pending:
+  if time.time()*1000-notice['sent_at']>=172800000:continue
+  try:
+   import requests
+   bridge=json.loads(Path(target['webhook_file']).read_text())
+   response=requests.post(bridge['url'],json={'banco_monitor_notice':notice},timeout=(5,15))
+   answer=response.json()
+   if response.status_code!=200 or answer.get('ok') is not True or answer.get('registered')!='monitor_health' or answer.get('message_id')!=notice['message_id']:
+    raise RuntimeError('Monitor notice registration not confirmed')
+  except Exception:
+   remaining.append(notice)
+ with state.db:state.db.execute("INSERT OR REPLACE INTO settings VALUES('health_notice_outbox',?)",(json.dumps(remaining),))
+ if remaining:print(json.dumps({'phase':'health_notice_cleanup','status':'registration_retry_next_cycle','pending':len(remaining)}))
+
 def notify_health(config,state,summary,sender=None):
+ register_health_notices(config,state)
  meaningful={'status':summary['status'],'errors':sorted(summary['errors'],key=lambda e:json.dumps(e,sort_keys=True)),'issues':summary.get('configuration_issues',0),'delivery_issues':summary.get('delivery_issues',0)}
  fingerprint=hashlib.sha256(json.dumps(meaningful,sort_keys=True).encode()).hexdigest()
  row=state.db.execute("SELECT value FROM settings WHERE key='health'").fetchone();previous=json.loads(row[0]) if row else {}
@@ -596,9 +618,16 @@ def notify_health(config,state,summary,sender=None):
   with state.db:state.db.execute("INSERT OR REPLACE INTO settings VALUES('health',?)",(json.dumps({'fingerprint':fingerprint,'status':'ok'}),))
   return
  text=health_text(summary) if summary['status']!='ok' else '✅ Monitor mail documenti: controlli tornati regolari.'
- result,_,_,_= (sender or Telegram(config)).send(text)
+ result,mid,_,_= (sender or Telegram(config)).send(text)
  if result=='sent':
-  with state.db:state.db.execute("INSERT OR REPLACE INTO settings VALUES('health',?)",(json.dumps({'fingerprint':fingerprint,'status':summary['status']}),))
+  with state.db:
+   state.db.execute("INSERT OR REPLACE INTO settings VALUES('health',?)",(json.dumps({'fingerprint':fingerprint,'status':summary['status']}),))
+   if config.get('dashboard_status',{}).get('webhook_file') and type(mid) is int and mid>0:
+    row=state.db.execute("SELECT value FROM settings WHERE key='health_notice_outbox'").fetchone()
+    pending=json.loads(row[0]) if row else []
+    pending.append({'message_id':mid,'sent_at':int(time.time()*1000)})
+    state.db.execute("INSERT OR REPLACE INTO settings VALUES('health_notice_outbox',?)",(json.dumps(pending),))
+  register_health_notices(config,state)
 
 def main():
  os.umask(0o077)

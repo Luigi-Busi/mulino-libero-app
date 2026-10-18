@@ -430,4 +430,47 @@ class BancoUpgradeTest(unittest.TestCase):
   with patch('requests.post',return_value=response):m.publish_dashboard({'dashboard_status':{'webhook_file':str(path)}},self.state)
   snap=self.state.db.execute("SELECT value FROM settings WHERE key='banco_chat_snapshot'").fetchone()[0];self.assertIn('55',snap);self.assertNotIn('password',snap)
 
+class HealthCleanupTest(unittest.TestCase):
+ setUp=StateTest.setUp
+ tearDown=StateTest.tearDown
+ def config(self):
+  path=Path(self.temp.name)/'bridge.json';path.write_text(json.dumps({'url':'https://test.invalid?key=SECRET'}))
+  return {**CONFIG,'dashboard_status':{'webhook_file':str(path)}}
+ def sender(self,mid=50):
+  sender=Mock();sender.send.return_value=('sent',mid,0,None);return sender
+ def warning(self):return {'status':'degraded','errors':[{'code':'CONNECTION_ERROR'}]}
+ def pending(self):
+  row=self.state.db.execute("SELECT value FROM settings WHERE key='health_notice_outbox'").fetchone()
+  return json.loads(row[0]) if row else []
+ def response(self,mid=50):
+  response=Mock();response.status_code=200;response.json.return_value={'ok':True,'registered':'monitor_health','message_id':mid};return response
+ def test_warning_registered_only_by_id_and_original_send_time(self):
+  cfg=self.config()
+  with patch.object(m.time,'time',return_value=200000),patch('requests.post',return_value=self.response()) as post:m.notify_health(cfg,self.state,self.warning(),self.sender())
+  self.assertEqual(post.call_args.kwargs['json'],{'banco_monitor_notice':{'message_id':50,'sent_at':200000000}});self.assertEqual(self.pending(),[])
+ def test_recovery_is_registered_in_same_category(self):
+  cfg=self.config()
+  with patch('requests.post',return_value=self.response()):m.notify_health(cfg,self.state,self.warning(),self.sender())
+  with patch('requests.post',return_value=self.response(51)) as post:m.notify_health(cfg,self.state,{'status':'ok','errors':[]},self.sender(51))
+  self.assertEqual(post.call_args.kwargs['json']['banco_monitor_notice']['message_id'],51)
+ def test_failed_registration_retries_without_resending_notification(self):
+  cfg=self.config();sender=self.sender()
+  with patch('requests.post',side_effect=OSError('SECRET')):m.notify_health(cfg,self.state,self.warning(),sender)
+  stamp=self.pending()[0]['sent_at'];self.assertEqual(len(self.pending()),1)
+  with patch('requests.post',return_value=self.response()) as post:m.notify_health(cfg,self.state,self.warning(),sender)
+  sender.send.assert_called_once();self.assertEqual(post.call_args.kwargs['json']['banco_monitor_notice']['sent_at'],stamp);self.assertEqual(self.pending(),[])
+ def test_old_bridge_generic_ok_does_not_lose_pending_job(self):
+  cfg=self.config();response=self.response();response.json.return_value={'ok':True}
+  with patch('requests.post',return_value=response):m.notify_health(cfg,self.state,self.warning(),self.sender())
+  self.assertEqual(len(self.pending()),1)
+ def test_uncertain_notification_never_registers_an_unknown_message(self):
+  sender=self.sender();sender.send.return_value=('uncertain',None,0,'NETWORK_UNCERTAIN')
+  with patch('requests.post') as post:m.notify_health(self.config(),self.state,self.warning(),sender)
+  post.assert_not_called();self.assertEqual(self.pending(),[])
+ def test_expired_registration_does_not_target_old_messages(self):
+  cfg=self.config()
+  with self.state.db:self.state.db.execute("INSERT INTO settings VALUES('health_notice_outbox',?)",(json.dumps([{'message_id':50,'sent_at':int((m.time.time()-49*3600)*1000)}]),))
+  with patch('requests.post') as post:m.register_health_notices(cfg,self.state)
+  post.assert_not_called();self.assertEqual(self.pending(),[])
+
 if __name__=='__main__':unittest.main(verbosity=2)

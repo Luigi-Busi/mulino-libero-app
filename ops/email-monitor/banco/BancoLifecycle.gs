@@ -71,22 +71,33 @@ function bancoLegacySent_(chat,id,text) {
 function bancoSkipLegacyDelete_(chat,id) {
   return String(chat)===String(ADMIN_TELEGRAM_ID) && bancoContext_ && Number(id)===bancoContext_.message;
 }
-function bancoExternalNotice_(id) {
+function bancoExternalNotice_(id,kind,sentAt) {
   if (!Number.isSafeInteger(id)||id<=0) throw new Error('Identificativo messaggio non valido');
-  bancoChatLock_(()=>{const s=bancoChatRead_();s.last=Math.max(s.last,id);bancoChatWrite_(s);});
+  bancoChatLock_(()=>{const s=bancoChatRead_();s.last=Math.max(s.last,id);
+    if (kind==='h' && Date.now()-sentAt<172800000) bancoRoutine_(s,id,'h',sentAt);
+    bancoChatWrite_(s);});
   const s=bancoChatRead_();if (s.panel && s.last>s.panel) bancoPanelRender_({id:ADMIN_TELEGRAM_ID},null,bancoHome_());
   return ContentService.createTextOutput(JSON.stringify({ok:true})).setMimeType(ContentService.MimeType.JSON);
+}
+function bancoMonitorNotice_(notice) {
+  if (!notice || !Number.isSafeInteger(notice.message_id) || notice.message_id<=0 ||
+      !Number.isSafeInteger(notice.sent_at) || notice.sent_at<=0 || notice.sent_at>Date.now()+300000)
+    throw new Error('Avviso monitor non valido');
+  bancoExternalNotice_(notice.message_id,'h',notice.sent_at);
+  return ContentService.createTextOutput(JSON.stringify({ok:true,message_id:notice.message_id,
+    registered:'monitor_health',retention_hours:12,version:BANCO_MENU_VERSION})).setMimeType(ContentService.MimeType.JSON);
 }
 function bancoManutenzioneChat() {
   bancoChatLock_(()=>{
     const s=bancoChatRead_(),now=Date.now();
     const latest=Math.max(0,...s.routines.filter(r=>r[2]==='r').map(r=>r[0]));
+    const latestHealth=Math.max(0,...s.routines.filter(r=>r[2]==='h').map(r=>r[0]));
     s.retired=s.retired.filter(id=>id===s.panel?false:!bancoDeleteKnown_(id));
     let count=0;
     s.routines=s.routines.filter(r=>{
       const id=r[0],age=now-r[1];
-      if (id===s.panel || (r[2]==='r' && id===latest)) return true;
-      if (age<86400000 || count>=12) return true;
+      if (id===s.panel || (r[2]==='r' && id===latest) || (r[2]==='h' && id===latestHealth)) return true;
+      if (age<(r[2]==='h'?43200000:86400000) || count>=12) return true;
       if (age>=172800000) return false; // Telegram can no longer delete it.
       count++;return !bancoDeleteKnown_(id);
     });
@@ -96,7 +107,7 @@ function bancoManutenzioneChat() {
 function bancoConfiguraManutenzione() {
   const triggers=ScriptApp.getProjectTriggers().filter(t=>t.getHandlerFunction()==='bancoManutenzioneChat');
   if (!triggers.length) ScriptApp.newTrigger('bancoManutenzioneChat').timeBased().everyMinutes(15).create();
-  console.log(JSON.stringify({ok:true,maintenance:'every_15_minutes',retention_hours:24,latest_reply_preserved:true}));
+  console.log(JSON.stringify({ok:true,maintenance:'every_15_minutes',retention_hours:24,monitor_health_retention_hours:12,latest_reply_preserved:true}));
 }
 function bancoInvalidate_() {
   const cache=CacheService.getScriptCache();
