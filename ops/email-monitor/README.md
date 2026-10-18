@@ -226,3 +226,30 @@ events are not replayed or backfilled. Settings metadata is compatible with
 rollback to 1.3.2; database schema, mail rules and operating hours are unchanged.
 144 isolated Python tests and read-only extraction from actual Sisal/PokerStars
 messages passed. Real verification links were not opened or printed.
+
+
+## Monitor 1.5.0 — diffida mail to account sheet
+
+New mail from the existing exact Sisal/PokerStars senders is matched against
+the operator-specific warning subject. A separate baseline prevents historical
+warning imports while preserving document-request and reactivation cursors.
+Events and cursors live in optional settings metadata: data schema remains 1.
+Message-ID deduplication spans inbox/spam, and matching reads headers only.
+
+Durable pending warning events set only the matching account's Diffida cell.
+The writer re-reads eligibility, dynamically resolves the Diffida header and
+row by unique ID_MULINO (or unique name/email when absent), checks email/name,
+mail password and both cell colors, preserves formulas and validations, and
+uses the exact affirmative dropdown value (Si on current sheets). Google
+service-account write scope is used only by this dedicated writer; ordinary
+inventory stays read-only. No extra user OAuth grants, tokens or Apps Script
+changes are required. Readback confirms writes; already affirmative cells make
+retries idempotent. Errors remain queued and join existing monitor health
+reporting. No additional Telegram diffida notice is sent.
+
+Only current eligible Sisal Sport and PokerStars accounts are checked hourly
+08..21 Europe/Rome. Existing warning mail is not imported. Rollback to 1.4.0
+ignores the optional settings metadata, preserves all old ledgers and disables
+new warning writes; it does not erase Si already written to Google Sheets.
+175 isolated Python tests, actual sender/header/validation checks and a zero
+change authorization probe on the real Diffida cells passed.

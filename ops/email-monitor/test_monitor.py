@@ -603,3 +603,140 @@ class VerificationFlowTest(unittest.TestCase):
   sender.send('Avviso',verification_url='https://evil.invalid/?ic=X&selfie=1');self.assertNotIn('reply_markup',sender.session.post.call_args.kwargs['json'])
 
 if __name__=='__main__':unittest.main(verbosity=2)
+
+class DiffidaDetectionTest(unittest.TestCase):
+ setUp=StateTest.setUp
+ tearDown=StateTest.tearDown
+ scan=StateTest.scan
+ def warning(self,sender='infoclienti@sisal.it',subject='Diffida per violazione termini e condizioni bonus',mid='<diffida>'):
+  return raw(sender,subject,mid)
+ def test_sisal_exact_subject_and_both_senders(self):
+  for sender in ['info@sisal.it','infoclienti@sisal.it']:
+   self.assertTrue(m.diffida_event(ACCOUNT.email,'sisal',self.warning(sender), '02-Oct-2026 12:30:00 +0000'))
+ def test_pokerstars_subject_normalized_contains(self):
+  message=self.warning('info@clienti.pokerstars.it','AVVISO: VIOLAZIONE  DI TERMINI E CONDIZIONI - account')
+  self.assertTrue(m.diffida_event(ACCOUNT.email,'pokerstars',message,'02-Oct-2026 12:30:00 +0000'))
+ def test_wrong_sender_similar_subject_and_disabled_operator_rejected(self):
+  for operator,message in [('sisal',self.warning('infoclienti@sisal.it.evil.example')),('sisal',self.warning('info@clienti.pokerstars.it')),('sisal',self.warning(subject='Violazione di Termini e Condizioni')),('snai',self.warning()),('pokerstars',self.warning())]:
+   self.assertIsNone(m.diffida_event(ACCOUNT.email,operator,message,'02-Oct-2026 12:30:00 +0000'))
+ def test_existing_document_cursor_does_not_import_historical_diffida(self):
+  with self.state.db:self.state.advance(ACCOUNT.email,'sisal','INBOX',1,1,3)
+  conn=FakeIMAP(uidnext=6,messages={4:self.warning()},folders=[b'() "/" INBOX'])
+  stats,errors=self.scan(conn);self.assertFalse(errors);self.assertFalse(m.pending_diffide(self.state));self.assertEqual(stats['diffida_baselines'],1)
+ def test_new_diffida_enqueued_once_and_no_document_or_followup_event(self):
+  self.scan(FakeIMAP(uidnext=6))
+  conn=FakeIMAP(uidnext=7,messages={6:self.warning()});stats,errors=self.scan(conn)
+  self.assertFalse(errors);self.assertEqual(stats['diffida_candidates'],1);self.assertEqual(len(m.pending_diffide(self.state)),1)
+  self.assertFalse(self.state.status()['delivery']);self.assertFalse(self.state.status()['reactivation_waits'])
+  self.assertTrue(all('HEADER.FIELDS' in c[-1] for c in conn.calls if c[0]=='FETCH'))
+ def test_diffida_cursor_does_not_regress_document_cursor_after_rollback(self):
+  self.scan(FakeIMAP(uidnext=6))
+  with self.state.db:self.state.advance(ACCOUNT.email,'sisal','INBOX',1,1,9)
+  conn=FakeIMAP(uidnext=11,messages={6:self.warning(),10:raw()},folders=[b'() "/" INBOX']);stats,errors=self.scan(conn)
+  self.assertFalse(errors);self.assertEqual(stats['diffida_candidates'],1);self.assertEqual(self.state.cursor(ACCOUNT.email,'sisal','INBOX')['uid'],10)
+ def test_mailbox_reactivation_rebaselines_diffida(self):
+  self.scan(FakeIMAP());self.state.sync([]);self.state.sync([ACCOUNT])
+  self.scan(FakeIMAP(uidnext=8,messages={7:self.warning()}));self.assertFalse(m.pending_diffide(self.state))
+ def test_uidvalidity_reset_rebaselines_diffida(self):
+  self.scan(FakeIMAP());self.scan(FakeIMAP(uidnext=8,validity=2,messages={7:self.warning()}));self.assertFalse(m.pending_diffide(self.state))
+ def test_failed_header_fetch_retains_diffida_boundary_for_retry(self):
+  self.scan(FakeIMAP(uidnext=6))
+  conn=FakeIMAP(uidnext=8,messages={6:raw(subject='Other'),7:self.warning()},fail_uid=7,folders=[b'() "/" INBOX'])
+  _,errors=self.scan(conn);self.assertTrue(errors);self.assertEqual(m.diffida_cursor(self.state,ACCOUNT.email,'sisal','INBOX')['uid'],6)
+  conn.fail_uid=None;self.scan(conn);self.assertEqual(len(m.pending_diffide(self.state)),1)
+ def test_pending_write_retries_durably_and_is_not_a_telegram_notice(self):
+  with self.state.db:m.enqueue_diffida(self.state,ACCOUNT.email,'sisal',self.warning(),'02-Oct-2026 12:30:00 +0000')
+  writer=Mock();writer.apply.side_effect=OSError('PRIVATE-CONTENT')
+  self.assertEqual(m.deliver_diffide({},self.state,writer),{'pending':1});self.assertEqual(len(m.pending_diffide(self.state)),1)
+  self.assertNotIn('PRIVATE-CONTENT',self.state.db.execute("SELECT value FROM settings WHERE key LIKE 'diffida_event:%'").fetchone()[0])
+  writer.apply.side_effect=None;writer.apply.return_value={'status':'applied','updated_cells':1}
+  self.assertEqual(m.deliver_diffide({},self.state,writer),{'applied':1,'updated_cells':1});self.assertFalse(m.pending_diffide(self.state))
+  m.deliver_diffide({},self.state,writer);self.assertEqual(writer.apply.call_count,2)
+ def test_restart_preserves_diffida_queue_without_schema_change(self):
+  before=self.state.db.execute("SELECT name,sql FROM sqlite_master WHERE type='table' ORDER BY name").fetchall()
+  with self.state.db:m.enqueue_diffida(self.state,ACCOUNT.email,'sisal',self.warning(),'02-Oct-2026 12:30:00 +0000')
+  self.state.db.close();self.state=m.State(Path(self.temp.name)/'state.sqlite3')
+  self.assertEqual(len(m.pending_diffide(self.state)),1);self.assertEqual(before,self.state.db.execute("SELECT name,sql FROM sqlite_master WHERE type='table' ORDER BY name").fetchall())
+ def test_full_cycle_diffida_write_failure_is_visible_and_retried(self):
+  with self.state.db:m.enqueue_diffida(self.state,ACCOUNT.email,'sisal',self.warning(),'02-Oct-2026 12:30:00 +0000')
+  pw=Path(self.temp.name)/'pw';pw.write_text('test-password');cfg={**CONFIG,'password_file':str(pw),'status_file':str(Path(self.temp.name)/'status.json')}
+  source=Mock();source.load.return_value=([ACCOUNT],{'Sisal Sport':{'eligible':1}});scanner=Mock();scanner.scan.return_value=({},[])
+  writer=Mock();writer.apply.side_effect=OSError('SECRET');sender=Mock()
+  result=m.run_cycle(cfg,self.state,source=source,scanner=scanner,sender=sender,sleep=lambda _:None,diffida_writer=writer)
+  self.assertEqual(result['status'],'degraded');self.assertEqual(result['delivery_issues'],1);sender.send.assert_not_called()
+
+class DiffidaWriteTest(unittest.TestCase):
+ def setUp(self):
+  self.temp=tempfile.TemporaryDirectory();self.pw=Path(self.temp.name)/'pw';self.pw.write_text('test-password')
+  self.cfg={**CONFIG,'password_file':str(self.pw),'sources':[{'book':'book','sheet':'Sisal Sport','gid':10,'operator':'sisal'}]}
+  self.spec=self.cfg['sources'][0];self.event={'email':ACCOUNT.email,'operator':'sisal'}
+  self.headers=['Data Apertura','Chiusura','Diffida','Nome Cognome','Username','Password','E-mail','Password E-mail','ID_MULINO']
+  self.values=['','No','No',ACCOUNT.name,'testuser','game-password',ACCOUNT.email,'test-password',ACCOUNT.stable_id]
+ def tearDown(self):self.temp.cleanup()
+ def metadata(self,color=None,validation=True,value=None,duplicate=False):
+  cells=[{'formattedValue':v} for v in self.values]
+  if color:
+   for i in [6,7]:cells[i]['effectiveFormat']={'backgroundColor':color}
+  if validation:cells[2]['dataValidation']={'condition':{'type':'ONE_OF_LIST','values':[{'userEnteredValue':'Si'},{'userEnteredValue':'No'}]},'strict':True}
+  if value is not None:cells[2]['formattedValue']=value
+  data=[{'startRow':7,'rowData':[{'values':[{'formattedValue':v} for v in self.headers]}]},{'startRow':20,'rowData':[{'values':cells}]}]
+  if duplicate:data.append({'startRow':21,'rowData':[{'values':cells}]})
+  return {'sheets':[{'properties':{'title':'Sisal Sport','sheetId':10},'data':data}]}
+ def plan(self,metadata=None,accounts=None):return m.diffida_plan(self.event,[ACCOUNT] if accounts is None else accounts,self.spec,metadata or self.metadata(),self.cfg)
+ def test_dynamic_row_by_id_and_exact_dropdown_value(self):
+  plan=self.plan();self.assertEqual(plan,[{'row':21,'column':3,'value':'Si','stable_id':'stable'}])
+ def test_account_without_mulino_id_uses_unique_email_and_name(self):
+  account=m.Account(ACCOUNT.operator,ACCOUNT.email,ACCOUNT.name,ACCOUNT.book,ACCOUNT.sheet,ACCOUNT.gid,ACCOUNT.row,'')
+  self.values[8]='';self.assertEqual(self.plan(accounts=[account])[0]['row'],21)
+ def test_missing_id_header_still_uses_unique_email_and_name(self):
+  account=m.Account(ACCOUNT.operator,ACCOUNT.email,ACCOUNT.name,ACCOUNT.book,ACCOUNT.sheet,ACCOUNT.gid,ACCOUNT.row,'')
+  self.headers[8]='Other';self.assertEqual(self.plan(accounts=[account])[0]['row'],21)
+ def test_duplicate_email_name_without_id_fails_closed(self):
+  account=m.Account(ACCOUNT.operator,ACCOUNT.email,ACCOUNT.name,ACCOUNT.book,ACCOUNT.sheet,ACCOUNT.gid,ACCOUNT.row,'')
+  self.values[8]=''
+  with self.assertRaises(m.DiffidaConfigurationError):self.plan(self.metadata(duplicate=True),[account])
+ def test_header_column_moves_without_wrong_write(self):
+  self.headers[2],self.headers[1]=self.headers[1],self.headers[2];self.values[2],self.values[1]=self.values[1],self.values[2]
+  plan=self.plan(self.metadata(validation=False));self.assertEqual(plan[0]['column'],2)
+ def test_existing_si_is_idempotent(self):self.assertEqual(self.plan(self.metadata(value='Si')),[])
+ def test_no_validation_uses_requested_lowercase(self):self.assertEqual(self.plan(self.metadata(validation=False))[0]['value'],'si')
+ def test_formula_preserved_with_no_write(self):
+  meta=self.metadata();meta['sheets'][0]['data'][1]['rowData'][0]['values'][2]['userEnteredValue']={'formulaValue':'=1'}
+  with self.assertRaises(m.DiffidaConfigurationError):self.plan(meta)
+ def test_ambiguous_diffida_header_fails_closed(self):
+  self.headers[1]='Diffida'
+  with self.assertRaises(m.DiffidaConfigurationError):self.plan()
+ def test_missing_diffida_header_fails_closed(self):
+  self.headers[2]='Other'
+  with self.assertRaises(m.DiffidaConfigurationError):self.plan()
+ def test_duplicate_id_fails_closed(self):
+  with self.assertRaises(m.DiffidaConfigurationError):self.plan(self.metadata(duplicate=True))
+ def test_email_changed_with_same_id_fails_closed(self):
+  self.values[6]='different@libero.it'
+  with self.assertRaises(m.DiffidaConfigurationError):self.plan()
+ def test_wrong_sheet_id_fails_closed(self):
+  meta=self.metadata();meta['sheets'][0]['properties']['sheetId']=99
+  with self.assertRaises(m.DiffidaConfigurationError):self.plan(meta)
+ def test_red_or_cyan_account_excluded_at_last_read(self):
+  self.assertEqual(self.plan(self.metadata(color={'red':1})),[]);self.assertEqual(self.plan(self.metadata(color={'green':1,'blue':1})),[])
+ def test_password_changed_fails_closed(self):
+  self.values[7]='other-password'
+  with self.assertRaises(m.DiffidaConfigurationError):self.plan()
+ def test_unsupported_validation_fails_closed(self):
+  meta=self.metadata();meta['sheets'][0]['data'][1]['rowData'][0]['values'][2]['dataValidation']={'condition':{'type':'BOOLEAN'}}
+  with self.assertRaises(m.DiffidaConfigurationError):self.plan(meta)
+ def writer(self,source_accounts=None,confirmed='Si'):
+  source=Mock();source.load.return_value=([ACCOUNT] if source_accounts is None else source_accounts,{})
+  client=Mock();book=Mock();client.open_by_key.return_value=book
+  book.fetch_sheet_metadata.side_effect=[{'sheets':[{'properties':{'sheetId':10,'title':'Sisal Sport','gridProperties':{'rowCount':100,'columnCount':26}}}]},self.metadata()]
+  book.values_batch_get.return_value={'valueRanges':[{'values':[[confirmed]]}]}
+  return m.DiffidaWriter(self.cfg,source,client),book
+ def test_only_diffida_user_entered_value_written_and_confirmed(self):
+  writer,book=self.writer();self.assertEqual(writer.apply(self.event),{'status':'applied','updated_cells':1})
+  request=book.batch_update.call_args[0][0]['requests'][0]['updateCells'];self.assertEqual(request['fields'],'userEnteredValue');self.assertEqual(request['range'],{'sheetId':10,'startRowIndex':20,'endRowIndex':21,'startColumnIndex':2,'endColumnIndex':3})
+  self.assertEqual(request['rows'],[{'values':[{'userEnteredValue':{'stringValue':'Si'}}]}]);self.assertEqual(book.values_batch_get.call_args[0][0],["'Sisal Sport'!C21"])
+ def test_inactive_red_removed_account_cancelled_without_write(self):
+  writer,book=self.writer(source_accounts=[]);self.assertEqual(writer.apply(self.event)['status'],'cancelled');book.batch_update.assert_not_called()
+ def test_unconfirmed_write_stays_retryable(self):
+  writer,_=self.writer(confirmed='No')
+  with self.assertRaises(RuntimeError):writer.apply(self.event)

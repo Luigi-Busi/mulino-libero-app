@@ -27,7 +27,7 @@ import time
 import unicodedata
 from zoneinfo import ZoneInfo
 
-VERSION = '1.4.0'
+VERSION = '1.5.0'
 RULES = {
  'sisal': ('info@sisal.it', "inviaci la copia del tuo documento d'identità"),
  'pokerstars': ('info@clienti.pokerstars.it', "inviaci il tuo documento d'identità"),
@@ -231,6 +231,153 @@ def document_event(email,operator,raw,received):
  return key,subject
 
 
+DIFFIDA_RULES={
+ 'sisal':'Diffida per violazione termini e condizioni bonus',
+ 'pokerstars':'Violazione di Termini e Condizioni',
+}
+
+def diffida_event(email,operator,raw,received):
+ if operator not in DIFFIDA_RULES:return None
+ message=BytesHeaderParser(policy=policy.default).parsebytes(raw)
+ addresses=getaddresses([str(h) for h in message.get_all('From',[])])
+ if len(addresses)!=1 or not allowed_sender(operator,addresses[0][1]):return None
+ if normalized(DIFFIDA_RULES[operator]) not in normalized(str(message.get('Subject',''))):return None
+ received_time(received)
+ fingerprint=str(message.get('Message-ID','')).strip() or hashlib.sha256(raw+received.encode()).hexdigest()
+ return hashlib.sha256(('diffida\n'+email+'\n'+operator+'\n'+fingerprint).encode()).hexdigest()
+
+def diffida_cursor_key(email,operator,folder):
+ return 'diffida_cursor:'+hashlib.sha256((email+'\n'+operator+'\n'+folder).encode()).hexdigest()
+
+def diffida_cursor(state,email,operator,folder):
+ row=state.db.execute('SELECT value FROM settings WHERE key=?',(diffida_cursor_key(email,operator,folder),)).fetchone()
+ return json.loads(row[0]) if row else None
+
+def advance_diffida(state,email,operator,folder,generation,validity,uid):
+ value=json.dumps({'activation':generation,'validity':validity,'uid':uid})
+ state.db.execute('INSERT OR REPLACE INTO settings VALUES(?,?)',(diffida_cursor_key(email,operator,folder),value))
+
+def enqueue_diffida(state,email,operator,raw,received):
+ key=diffida_event(email,operator,raw,received)
+ if key is None:return False
+ event={'event_key':key,'email':email,'operator':operator,'received':received,'status':'pending','created':now(),'updated':now()}
+ cur=state.db.execute('INSERT OR IGNORE INTO settings VALUES(?,?)',('diffida_event:'+key,json.dumps(event)))
+ return cur.rowcount==1
+
+def pending_diffide(state):
+ return [json.loads(row[0]) for row in state.db.execute("SELECT value FROM settings WHERE key LIKE 'diffida_event:%' ORDER BY key") if json.loads(row[0]).get('status')=='pending']
+
+class DiffidaConfigurationError(ValueError):pass
+
+def diffida_column_name(number):
+ text=''
+ while number:number,remainder=divmod(number-1,26);text=chr(65+remainder)+text
+ return text
+
+def diffida_value(cell):
+ if 'formulaValue' in cell.get('userEnteredValue',{}):raise DiffidaConfigurationError('Diffida cell contains a formula')
+ rule=cell.get('dataValidation',{})
+ if rule:
+  condition=rule.get('condition',{})
+  if condition.get('type')!='ONE_OF_LIST':raise DiffidaConfigurationError('Unsupported Diffida validation')
+  choices=[v.get('userEnteredValue','') for v in condition.get('values',[]) if normalized(v.get('userEnteredValue',''))=='si']
+  if len(choices)!=1:raise DiffidaConfigurationError('Diffida validation has no unique affirmative')
+  return choices[0]
+ return 'si'
+
+def diffida_plan(event,accounts,source,metadata,config):
+ sheets=[s for s in metadata.get('sheets',[]) if s.get('properties',{}).get('sheetId')==source['gid'] and s['properties'].get('title')==source['sheet']]
+ if len(sheets)!=1:raise DiffidaConfigurationError('Sheet identity changed')
+ theme={p['colorType']:p['color'].get('rgbColor') for p in metadata.get('properties',{}).get('spreadsheetTheme',{}).get('themeColors',[])}
+ rows=[]
+ for block in sheets[0].get('data',[]):rows.extend((block.get('startRow',0)+i+1,row.get('values',[])) for i,row in enumerate(block.get('rowData',[])))
+ headers=[]
+ for number,cells in rows:
+  if number>30:continue
+  vals=[normalized(c.get('formattedValue','')) for c in cells]
+  if 'diffida' in vals and any(v in ['e-mail','email','mail'] for v in vals):
+   groups=[['diffida'],['e-mail','email','mail'],['password e-mail','pass e-mail','password email','pass email'],['nome cognome','nome e cognome']]
+   indices=[[i for i,v in enumerate(vals) if v in names] for names in groups]
+   if any(len(v)!=1 for v in indices):raise DiffidaConfigurationError('Ambiguous Diffida account headers')
+   ids=[i for i,v in enumerate(vals) if v=='id_mulino']
+   if len(ids)>1:raise DiffidaConfigurationError('Ambiguous stable identity header')
+   headers.append((number,indices[0][0],ids[0] if ids else None,*[v[0] for v in indices[1:]]))
+ if len(headers)!=1:raise DiffidaConfigurationError('Diffida headers absent or ambiguous')
+ hr,dc,ic,ec,pc,nc=headers[0]
+ if ec!=6 or pc!=7:raise DiffidaConfigurationError('Mail columns moved')
+ targets=[a for a in accounts if (a.email,a.operator,a.book,a.gid)==(event['email'],event['operator'],source['book'],source['gid'])]
+ plans=[];common=Path(config['password_file']).read_text().strip()
+ if not common:raise DiffidaConfigurationError('Password configuration absent')
+ for account in targets:
+  candidates=[]
+  for rownum,cells in rows:
+   cell=lambda i:cells[i] if i is not None and i<len(cells) else {}
+   identity=(ic is not None and cell(ic).get('formattedValue','').strip()==account.stable_id) if account.stable_id else (cell(ec).get('formattedValue','').strip().lower()==account.email and cell(nc).get('formattedValue','').strip()==account.name)
+   if rownum>hr and identity:candidates.append((rownum,cells))
+  if len(candidates)!=1:raise DiffidaConfigurationError('Stable account identity is not unique')
+  rownum,cells=candidates[0];cell=lambda i:cells[i] if i<len(cells) else {}
+  if cell(ec).get('formattedValue','').strip().lower()!=event['email'] or cell(nc).get('formattedValue','').strip()!=account.name:raise DiffidaConfigurationError('Account identity changed')
+  ce,cp=background(cell(ec),theme),background(cell(pc),theme)
+  if ce!=cp or not allowed_color(ce,config) or not allowed_color(cp,config):continue
+  if cell(pc).get('formattedValue','').strip()!=common:raise DiffidaConfigurationError('Mailbox password changed')
+  affirmative=diffida_value(cell(dc))
+  # Re-reading after an interrupted write makes retry naturally idempotent.
+  if normalized(cell(dc).get('formattedValue',''))=='si':continue
+  plans.append({'row':rownum,'column':dc+1,'value':affirmative,'stable_id':account.stable_id})
+ return plans
+
+class DiffidaWriter:
+ def __init__(self,config,source=None,client=None):
+  self.config=config;self.source=source;self.client=client
+
+ def apply(self,event):
+  source=self.source or SheetsSource(self.config)
+  accounts,_=source.load()
+  targets=[a for a in accounts if (a.email,a.operator)==(event['email'],event['operator'])]
+  if not targets:return {'status':'cancelled','updated_cells':0}
+  if self.client is None:
+   import gspread
+   self.client=gspread.service_account(filename=self.config['google_credentials'],scopes=['https://www.googleapis.com/auth/spreadsheets'])
+   self.client.set_timeout(45)
+  updated=0
+  for spec in self.config['sources']:
+   if spec['operator']!=event['operator'] or not any((a.book,a.gid)==(spec['book'],spec['gid']) for a in targets):continue
+   book=self.client.open_by_key(spec['book'])
+   properties=book.fetch_sheet_metadata(params={'fields':'sheets(properties)'})
+   matches=[s['properties'] for s in properties.get('sheets',[]) if s['properties'].get('sheetId')==spec['gid'] and s['properties'].get('title')==spec['sheet']]
+   if len(matches)!=1:raise DiffidaConfigurationError('Configured sheet changed')
+   count=matches[0]['gridProperties']['rowCount'];cols=matches[0]['gridProperties']['columnCount']
+   if count>self.config.get('max_rows',10000) or cols<8 or cols>256:raise DiffidaConfigurationError('Unexpected sheet dimensions')
+   quoted="'"+spec['sheet'].replace("'","''")+"'"
+   raw=book.fetch_sheet_metadata(params={'ranges':f'{quoted}!A1:{diffida_column_name(cols)}{count}','fields':'properties(spreadsheetTheme),sheets(properties(sheetId,title),data(startRow,rowData(values(formattedValue,userEnteredValue,dataValidation,effectiveFormat(backgroundColor,backgroundColorStyle)))))'})
+   plans=diffida_plan(event,accounts,spec,raw,self.config)
+   # Only userEnteredValue of exact Diffida cells changes. Formatting and
+   # validation remain intact; no whole-row writes and no sheet creation.
+   if plans:
+    requests=[{'updateCells':{'range':{'sheetId':spec['gid'],'startRowIndex':p['row']-1,'endRowIndex':p['row'],'startColumnIndex':p['column']-1,'endColumnIndex':p['column']},'rows':[{'values':[{'userEnteredValue':{'stringValue':p['value']}}]}],'fields':'userEnteredValue'}} for p in plans]
+    book.batch_update({'requests':requests})
+    ranges=[f"{quoted}!{diffida_column_name(p['column'])}{p['row']}" for p in plans]
+    confirmed=book.values_batch_get(ranges,params={'valueRenderOption':'UNFORMATTED_VALUE'})
+    values=confirmed.get('valueRanges',[])
+    if len(values)!=len(plans) or any(v.get('values')!=[[p['value']]] for v,p in zip(values,plans)):raise RuntimeError('Diffida write not confirmed')
+    updated+=len(plans)
+  return {'status':'applied','updated_cells':updated}
+
+def deliver_diffide(config,state,writer=None):
+ stats=collections.Counter();writer=writer or DiffidaWriter(config)
+ for event in pending_diffide(state)[:100]:
+  event['attempts']=event.get('attempts',0)+1
+  try:
+   result=writer.apply(event)
+   if result['status'] not in ['applied','cancelled']:raise ValueError('Unexpected Diffida result')
+   event.update(status=result['status'],updated=now(),updated_cells=result['updated_cells']);event.pop('error',None)
+   stats[result['status']]+=1;stats['updated_cells']+=result['updated_cells']
+  except Exception as exc:
+   event.update(error=error_code(exc),updated=now());stats['pending']+=1
+  with state.db:state.db.execute('INSERT OR REPLACE INTO settings VALUES(?,?)',('diffida_event:'+event['event_key'],json.dumps(event)))
+ return dict(stats)
+
+
 class State:
  def __init__(self, path):
   Path(path).parent.mkdir(parents=True,exist_ok=True)
@@ -295,6 +442,7 @@ class State:
    'delivery':dict(self.db.execute('SELECT status,COUNT(*) FROM events GROUP BY status').fetchall()),
    'reactivation_waits':dict(self.db.execute('SELECT status,COUNT(*) FROM followups GROUP BY status').fetchall()),
    'reactivation_delivery':dict(self.db.execute('SELECT status,COUNT(*) FROM followup_events GROUP BY status').fetchall()),
+   'diffida_delivery':dict(collections.Counter(json.loads(r[0]).get('status','unknown') for r in self.db.execute("SELECT value FROM settings WHERE key LIKE 'diffida_event:%'"))),
    'last_run':dict(self.db.execute('SELECT * FROM runs ORDER BY id DESC LIMIT 1').fetchone() or {}),
    'integrity':self.db.execute('PRAGMA quick_check').fetchone()[0]}
 
@@ -372,7 +520,7 @@ class Scanner:
    return int(data[0])
   validity=response_int('UIDVALIDITY');upper=response_int('UIDNEXT')-1
   if validity<=0 or upper<0:raise ValueError('Invalid UID metadata')
-  tracked={}
+  tracked={};diffida_tracked={}
   with self.state.db:
    for operator in operators:
     generation=self.state.generation(email,operator);cursor=self.state.cursor(email,operator,folder)
@@ -380,8 +528,13 @@ class Scanner:
      self.state.advance(email,operator,folder,generation,validity,upper);stats['baselines']+=1
      if cursor is not None and cursor['validity']!=validity:stats['uidvalidity_resets']+=1
     else: tracked[operator]=(generation,cursor['uid'])
-  if not tracked:return
-  low=min(uid for _,uid in tracked.values())+1
+    if operator in DIFFIDA_RULES:
+     dc=diffida_cursor(self.state,email,operator,folder)
+     if dc is None or dc['validity']!=validity or dc['activation']!=generation:
+      advance_diffida(self.state,email,operator,folder,generation,validity,upper);stats['diffida_baselines']+=1
+     else:diffida_tracked[operator]=(generation,dc['uid'])
+  if not tracked and not diffida_tracked:return
+  low=min(uid for _,uid in [*tracked.values(),*diffida_tracked.values()])+1
   if low>upper:stats['folders_unchanged']+=1;return
   typ,data=conn.uid('SEARCH',None,'UID',f'{low}:{upper}')
   if typ!='OK' or not data or not isinstance(data[0],bytes):raise RuntimeError('SEARCH failed')
@@ -430,11 +583,17 @@ class Scanner:
     for operator,(generation,cursor_uid) in tracked.items():
      if uid>cursor_uid:
       if self.state.enqueue(email,operator,raw,received,verification.get(operator)):stats['candidates']+=1
-      self.state.advance(email,operator,folder,generation,validity,uid)
+      self.state.advance(email,operator,folder,generation,validity,max(cursor_uid,uid))
+    for operator,(generation,cursor_uid) in diffida_tracked.items():
+     if uid>cursor_uid:
+      if enqueue_diffida(self.state,email,operator,raw,received):stats['diffida_candidates']+=1
+     advance_diffida(self.state,email,operator,folder,generation,validity,max(cursor_uid,uid))
    stats['headers']+=1
   with self.state.db:
    for operator,(generation,old_uid) in tracked.items():
     self.state.advance(email,operator,folder,generation,validity,max(old_uid,target))
+   for operator,(generation,old_uid) in diffida_tracked.items():
+    advance_diffida(self.state,email,operator,folder,generation,validity,max(old_uid,target))
   if len(uids)>cap:stats['backlog_folders']+=1
   stats['folders_checked']+=1
 
@@ -615,7 +774,7 @@ def publish_dashboard(config,state,client=None):
  count=max(len(rows),len(previous));payload=rows+[['']*8 for _ in range(count-len(rows))]
  sheet.update(range_name=f'A1:H{count}',values=payload,value_input_option='RAW')
 
-def run_cycle(config,state,source=None,scanner=None,sender=None,sleep=time.sleep):
+def run_cycle(config,state,source=None,scanner=None,sender=None,sleep=time.sleep,diffida_writer=None):
  if not within_hours(config):return {'status':'outside_operating_hours','errors':[],'started':now(),'finished':now()}
  started=now();rid=state.db.execute('INSERT INTO runs(started) VALUES(?)',(started,)).lastrowid;state.db.commit()
  summary={'version':VERSION,'started':started,'status':'running','errors':[]}
@@ -656,6 +815,10 @@ def run_cycle(config,state,source=None,scanner=None,sender=None,sleep=time.sleep
   with state.db:
    for table in ['events','followup_events']:state.db.execute(f"UPDATE {table} SET status='uncertain',error='PROCESS_INTERRUPTED',updated=? WHERE status='sending'",(now(),))
   pending_problem=sum(state.db.execute(f"SELECT COUNT(*) FROM {table} WHERE status IN ('uncertain','failed')").fetchone()[0] for table in ['events','followup_events'])
+  if pending_diffide(state):
+   summary['diffida_delivery']=deliver_diffide(config,state,diffida_writer)
+   remaining=pending_diffide(state);pending_problem+=len(remaining)
+   summary['errors'].extend({'phase':'diffida_sheet','code':code} for code in sorted({e.get('error','DIFFIDA_WRITE_PENDING') for e in remaining}))
   summary['reactivation_waits']=dict(state.db.execute('SELECT status,COUNT(*) FROM followups GROUP BY status').fetchall())
   issues=sum(sum(v.get(key,0) for key in ['color_discordance','invalid_or_unsupported_email','missing_password','password_mismatch','missing_name']) for v in sheets.values())
   summary['configuration_issues']=issues;summary['delivery_issues']=pending_problem
