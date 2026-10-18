@@ -6,12 +6,12 @@ let bancoForceRefresh_ = false;
 
 function bancoChatRead_() {
   let s;
-  try {s=JSON.parse(PropertiesService.getScriptProperties().getProperty(BANCO_CHAT_KEY)||'{}');} catch (_) {s={};}
+  try {s=JSON.parse(PropertiesService.getScriptProperties().getProperty(bancoChatKey_())||'{}');} catch (_) {s={};}
   return {panel:Number(s.panel)||0,last:Number(s.last)||0,routines:Array.isArray(s.routines)?s.routines:[],retired:Array.isArray(s.retired)?s.retired:[]};
 }
 function bancoChatWrite_(s) {
   s.routines=s.routines.slice(-180);s.retired=s.retired.slice(-40);
-  PropertiesService.getScriptProperties().setProperty(BANCO_CHAT_KEY,JSON.stringify(s));
+  PropertiesService.getScriptProperties().setProperty(bancoChatKey_(),JSON.stringify(s));
 }
 function bancoChatLock_(fn) {
   const lock=LockService.getScriptLock();lock.waitLock(15000);
@@ -87,7 +87,7 @@ function bancoMonitorNotice_(notice) {
   return ContentService.createTextOutput(JSON.stringify({ok:true,message_id:notice.message_id,
     registered:'monitor_health',retention_hours:12,version:BANCO_MENU_VERSION})).setMimeType(ContentService.MimeType.JSON);
 }
-function bancoManutenzioneChat() {
+function bancoManutenzioneChatScope_() {
   bancoChatLock_(()=>{
     const s=bancoChatRead_(),now=Date.now();
     const latest=Math.max(0,...s.routines.filter(r=>r[2]==='r').map(r=>r[0]));

@@ -473,4 +473,20 @@ class HealthCleanupTest(unittest.TestCase):
   with patch('requests.post') as post:m.register_health_notices(cfg,self.state)
   post.assert_not_called();self.assertEqual(self.pending(),[])
 
+class SegretarioSplitTest(unittest.TestCase):
+ setUp=StateTest.setUp
+ tearDown=StateTest.tearDown
+ def test_banco_notifications_no_longer_include_dashboard_buttons(self):
+  sender=object.__new__(m.Telegram);sender.token='TEST';sender.chat=1;sender.session=Mock();sender.dashboard_button=True;sender.restore_panel=Mock()
+  response=sender.session.post.return_value;response.status_code=200;response.json.return_value={'ok':True,'result':{'message_id':55}}
+  self.assertEqual(sender.send('Notification'),('sent',55,0,None))
+  self.assertNotIn('reply_markup',sender.session.post.call_args.kwargs['json']);sender.restore_panel.assert_called_once_with(55)
+ def test_status_sync_saves_both_bot_chat_snapshots_without_secrets(self):
+  path=Path(self.temp.name)/'bridge.json';path.write_text(json.dumps({'url':'https://test.invalid?key=SECRET'}))
+  rows=m.mirror_rows(self.state,'');digest=m.hashlib.sha256(json.dumps(rows,separators=(',',':'),ensure_ascii=False).encode()).hexdigest()
+  response=Mock();response.status_code=200;response.json.return_value={'ok':True,'digest':digest,'chat_state':{'panel':55,'routines':[],'retired':[],'last':55},'dashboard_chat_state':{'panel':66,'routines':[],'retired':[],'last':66}}
+  with patch('requests.post',return_value=response):m.publish_dashboard({'dashboard_status':{'webhook_file':str(path)}},self.state)
+  first=json.loads(self.state.db.execute("SELECT value FROM settings WHERE key='banco_chat_snapshot'").fetchone()[0]);second=json.loads(self.state.db.execute("SELECT value FROM settings WHERE key='segretario_chat_snapshot'").fetchone()[0])
+  self.assertEqual(first['state']['panel'],55);self.assertEqual(second['state']['panel'],66);self.assertNotIn('SECRET',json.dumps(second))
+
 if __name__=='__main__':unittest.main(verbosity=2)

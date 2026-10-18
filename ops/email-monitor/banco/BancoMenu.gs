@@ -1,11 +1,12 @@
 // Il Banco: private account dashboard. No credentials in logs/cache/callback_data.
-const BANCO_MENU_VERSION = '1.1.3';
+const BANCO_MENU_VERSION = '1.2.0';
 const BANCO_STATUS_TAB = 'Stato Account Banco';
 const BANCO_PAGE_SIZE = 8;
 const BANCO_COLORS = ['#ffffff','#ff00ff','#9900ff','#d9d2e9','#b4a7d6','#8e7cc3','#674ea7','#351c75','#20124d'];
 
 // Manual commissioning check: only the configured administrator receives views.
 function bancoVerificaMenuPrivato() {
+  return bancoConDashboard_(()=>{
   const chat={id:String(ADMIN_TELEGRAM_ID),type:'private'};
   bancoAnswerCallback_({id:'commissioning-expired-callback'});
   const root=bancoRender_(chat,null,bancoRoot_());
@@ -19,6 +20,7 @@ function bancoVerificaMenuPrivato() {
     list=bancoRender_(chat,null,view);
   }
   console.log(JSON.stringify({ok:true,version:BANCO_MENU_VERSION,worksheets:items.length,root_message:root.message_id,list_message:list && list.message_id,descending:descending,expired_callback_does_not_block:true}));
+  });
 }
 
 function bancoRiceviStati_(rows) {
@@ -43,12 +45,12 @@ function bancoRiceviStati_(rows) {
     sheet.getRange(1,1,total,8).setNumberFormat('@').setValues(payload);
     SpreadsheetApp.flush();
     const digest=Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256,JSON.stringify(rows),Utilities.Charset.UTF_8).map(v=>('0'+((v+256)%256).toString(16)).slice(-2)).join('');
-    return ContentService.createTextOutput(JSON.stringify({ok:true,rows:rows.length,digest:digest,version:BANCO_MENU_VERSION,chat_state:bancoChatRead_()})).setMimeType(ContentService.MimeType.JSON);
+    return ContentService.createTextOutput(JSON.stringify({ok:true,rows:rows.length,digest:digest,version:BANCO_MENU_VERSION,chat_state:bancoChatRead_(),dashboard_chat_state:bancoDashboardSnapshot_()})).setMimeType(ContentService.MimeType.JSON);
   } finally {lock.releaseLock();}
 }
 
 function bancoApi_(method, data) {
-  const token = PropertiesService.getScriptProperties().getProperty('TELEGRAM_TOKEN');
+  const token = PropertiesService.getScriptProperties().getProperty(bancoTokenProperty_());
   if (!token) throw new Error('Banco non configurato');
   let response;
   try {
@@ -107,6 +109,7 @@ function bancoGestisciUpdate(update) {
   if (!recognized) return false;
   // Existing commands continue through the original authorization/correction code.
   if (callback && /^bn:cmd:(correggi|annulla|test|id)$/.test(data)) {
+    if (bancoDashboardContext_) {bancoRender_(chat,message.message_id,segretarioHelp_());return true;}
     update.message = {from:actor, chat:chat, message_id:message.message_id,text:'/'+data.split(':')[2]};
     return false;
   }
@@ -133,14 +136,15 @@ function bancoGestisciUpdate(update) {
 
 function bancoButton_(text,data) {return {text:text,callback_data:data};}
 function bancoHome_() {
-  return {text:'🏦 Il Banco\n\nConsulta gli account e il loro stato, oppure usa i comandi di gestione.\nPer inserire un account, invia il messaggio completo con i dati come fai già.',buttons:[
-    [bancoButton_('📊 Stato account','bn:root')],
+  if (bancoDashboardContext_) return bancoRoot_();
+  return {text:'🏦 Il Banco\n\nInvia i dati completi per inserire un account, oppure usa i comandi di gestione. Gli avvisi del monitor email arrivano qui.',buttons:[
     [bancoButton_('✏️ Correggi ultimo inserimento','bn:cmd:correggi')],
     [bancoButton_('↩️ Annulla correzione','bn:cmd:annulla'),bancoButton_('🧪 Test','bn:cmd:test')],
     [bancoButton_('❓ Guida','bn:help'),bancoButton_('🆔 Il mio ID','bn:cmd:id')]]};
 }
 function bancoHelp_() {
-  return {text:'🏦 Guida del Banco\n\n/menu — apre il menu\n/account o /stato — fogli e stato account\n/correggi — corregge il tuo ultimo inserimento entro 60 minuti; reinvia poi il messaggio completo\n/annulla — esce dalla correzione\n/test — verifica i collegamenti configurati\n/id — mostra il tuo identificativo Telegram\n\nNella scheda account puoi copiare username, password dell’account ed email. La password è nascosta nel testo.\n\n🟢 Attivo: nessuna richiesta documenti rilevata dal monitor.\n🟠 Richiesta documenti: mail individuata dal monitor.\n✅ Riattivato: successiva mail di riattivazione individuata.\n⚪ Non monitorato: fuori dai controlli attivi.\n\nIl monitor controlla ogni ora dalle 08:00 alle 21:00, ora italiana. Dopo la notifica della richiesta documento, la riattivazione viene cercata dalle 08:00 del giorno successivo, inclusa la posta arrivata nel frattempo.',buttons:[[bancoButton_('📊 Stato account','bn:root'),bancoButton_('🏠 Menu','bn:menu')]]};
+  if (bancoDashboardContext_) return segretarioHelp_();
+  return {text:'🏦 Guida del Banco\n\n/menu — apre il menu\n/correggi — corregge il tuo ultimo inserimento entro 60 minuti; reinvia poi il messaggio completo\n/annulla — esce dalla correzione\n/test — verifica i collegamenti configurati\n/id — mostra il tuo identificativo Telegram\n\nPer inserire un account invia il messaggio completo nel formato abituale. Le notifiche del monitor email continuano ad arrivare sul Banco. La consultazione degli account è disponibile su Il Segretario.',buttons:[[bancoButton_('🏠 Menu','bn:menu')]]};
 }
 
 function bancoBooks_() {
@@ -240,10 +244,11 @@ function bancoCounts_(accounts,item,mirror) {
   return '🟢 '+counts.active+'  🟠 '+counts.documents+'  ✅ '+counts.reactivated+'  ⚪ '+counts.unmonitored+(counts.unknown?'  🔵 '+counts.unknown:'');
 }
 function bancoRoot_() {
+  if (!bancoDashboardContext_) return bancoMoved_();
   const cache=CacheService.getScriptCache(),key='bn:root:'+BANCO_MENU_VERSION;
   if (!bancoForceRefresh_) {try {const hit=cache.get(key);if(hit) return JSON.parse(hit);} catch (_) {}}
   const mirror=bancoMirror_(),items=bancoSheets_(),buttons=[];
-  let text='📊 Stato account\n\n';let lastBook=null;
+  let text='📋 Il Segretario · Stato account\n\n';let lastBook=null;
   items.forEach(item=>{
     if (lastBook!==item.book) {text+='📁 '+item.bookTitle+'\n';lastBook=item.book;}
     const accounts=bancoAccounts_(item,false);
@@ -257,6 +262,7 @@ function bancoRoot_() {
   return view;
 }
 function bancoSheet_(bi,gid,requestedPage) {
+  if (!bancoDashboardContext_) return bancoMoved_();
   const item=bancoFindSheet_(bi,gid),mirror=bancoMirror_(),accounts=bancoAccounts_(item,false).slice().reverse();
   const pages=Math.max(1,Math.ceil(accounts.length/BANCO_PAGE_SIZE)),page=Math.min(requestedPage,pages-1);
   const batch=accounts.slice(page*BANCO_PAGE_SIZE,(page+1)*BANCO_PAGE_SIZE);
@@ -271,6 +277,7 @@ function bancoSheet_(bi,gid,requestedPage) {
   return {text:text,buttons:buttons};
 }
 function bancoAccount_(bi,gid,row,fingerprint,page) {
+  if (!bancoDashboardContext_) return bancoMoved_();
   const item=bancoFindSheet_(bi,gid),account=bancoAccounts_(item,true,row).find(a=>a.row===row);
   const back='bn:s:'+bi+':'+gid+':'+page;
   if (!account || account.fingerprint!==fingerprint) return {text:'La riga dell’account è cambiata. Apri di nuovo l’elenco per consultare i dati aggiornati.',buttons:[[bancoButton_('📋 Torna agli account',back)]]};

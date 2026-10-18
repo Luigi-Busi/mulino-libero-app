@@ -167,10 +167,8 @@ function doPost(e) {
     // CONTROLLO SEGRETO WEBHOOK
     // ========================================================
 
-    const secret =
-      props.getProperty(
-        "WEBHOOK_SECRET"
-      );
+    bancoDashboardContext_=!!(e && e.parameter && e.parameter.bot==='dashboard');
+    const secret=props.getProperty(bancoDashboardContext_?'DASHBOARD_WEBHOOK_SECRET':'WEBHOOK_SECRET');
 
 
     if (
@@ -212,6 +210,8 @@ function doPost(e) {
       return rispostaOK();
     }
 
+
+    if (bancoDashboardContext_) {segretarioRiceviUpdate_(update);return rispostaOK();}
 
     // Authenticated state sync uses the same existing webhook secret.
     if (update && Array.isArray(update.banco_status_sync)) {
@@ -4550,13 +4550,14 @@ function numeroColonnaLettera(
 }
 
 // Il Banco: private account dashboard. No credentials in logs/cache/callback_data.
-const BANCO_MENU_VERSION = '1.1.3';
+const BANCO_MENU_VERSION = '1.2.0';
 const BANCO_STATUS_TAB = 'Stato Account Banco';
 const BANCO_PAGE_SIZE = 8;
 const BANCO_COLORS = ['#ffffff','#ff00ff','#9900ff','#d9d2e9','#b4a7d6','#8e7cc3','#674ea7','#351c75','#20124d'];
 
 // Manual commissioning check: only the configured administrator receives views.
 function bancoVerificaMenuPrivato() {
+  return bancoConDashboard_(()=>{
   const chat={id:String(ADMIN_TELEGRAM_ID),type:'private'};
   bancoAnswerCallback_({id:'commissioning-expired-callback'});
   const root=bancoRender_(chat,null,bancoRoot_());
@@ -4570,6 +4571,7 @@ function bancoVerificaMenuPrivato() {
     list=bancoRender_(chat,null,view);
   }
   console.log(JSON.stringify({ok:true,version:BANCO_MENU_VERSION,worksheets:items.length,root_message:root.message_id,list_message:list && list.message_id,descending:descending,expired_callback_does_not_block:true}));
+  });
 }
 
 function bancoRiceviStati_(rows) {
@@ -4594,12 +4596,12 @@ function bancoRiceviStati_(rows) {
     sheet.getRange(1,1,total,8).setNumberFormat('@').setValues(payload);
     SpreadsheetApp.flush();
     const digest=Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256,JSON.stringify(rows),Utilities.Charset.UTF_8).map(v=>('0'+((v+256)%256).toString(16)).slice(-2)).join('');
-    return ContentService.createTextOutput(JSON.stringify({ok:true,rows:rows.length,digest:digest,version:BANCO_MENU_VERSION,chat_state:bancoChatRead_()})).setMimeType(ContentService.MimeType.JSON);
+    return ContentService.createTextOutput(JSON.stringify({ok:true,rows:rows.length,digest:digest,version:BANCO_MENU_VERSION,chat_state:bancoChatRead_(),dashboard_chat_state:bancoDashboardSnapshot_()})).setMimeType(ContentService.MimeType.JSON);
   } finally {lock.releaseLock();}
 }
 
 function bancoApi_(method, data) {
-  const token = PropertiesService.getScriptProperties().getProperty('TELEGRAM_TOKEN');
+  const token = PropertiesService.getScriptProperties().getProperty(bancoTokenProperty_());
   if (!token) throw new Error('Banco non configurato');
   let response;
   try {
@@ -4658,6 +4660,7 @@ function bancoGestisciUpdate(update) {
   if (!recognized) return false;
   // Existing commands continue through the original authorization/correction code.
   if (callback && /^bn:cmd:(correggi|annulla|test|id)$/.test(data)) {
+    if (bancoDashboardContext_) {bancoRender_(chat,message.message_id,segretarioHelp_());return true;}
     update.message = {from:actor, chat:chat, message_id:message.message_id,text:'/'+data.split(':')[2]};
     return false;
   }
@@ -4684,14 +4687,15 @@ function bancoGestisciUpdate(update) {
 
 function bancoButton_(text,data) {return {text:text,callback_data:data};}
 function bancoHome_() {
-  return {text:'🏦 Il Banco\n\nConsulta gli account e il loro stato, oppure usa i comandi di gestione.\nPer inserire un account, invia il messaggio completo con i dati come fai già.',buttons:[
-    [bancoButton_('📊 Stato account','bn:root')],
+  if (bancoDashboardContext_) return bancoRoot_();
+  return {text:'🏦 Il Banco\n\nInvia i dati completi per inserire un account, oppure usa i comandi di gestione. Gli avvisi del monitor email arrivano qui.',buttons:[
     [bancoButton_('✏️ Correggi ultimo inserimento','bn:cmd:correggi')],
     [bancoButton_('↩️ Annulla correzione','bn:cmd:annulla'),bancoButton_('🧪 Test','bn:cmd:test')],
     [bancoButton_('❓ Guida','bn:help'),bancoButton_('🆔 Il mio ID','bn:cmd:id')]]};
 }
 function bancoHelp_() {
-  return {text:'🏦 Guida del Banco\n\n/menu — apre il menu\n/account o /stato — fogli e stato account\n/correggi — corregge il tuo ultimo inserimento entro 60 minuti; reinvia poi il messaggio completo\n/annulla — esce dalla correzione\n/test — verifica i collegamenti configurati\n/id — mostra il tuo identificativo Telegram\n\nNella scheda account puoi copiare username, password dell’account ed email. La password è nascosta nel testo.\n\n🟢 Attivo: nessuna richiesta documenti rilevata dal monitor.\n🟠 Richiesta documenti: mail individuata dal monitor.\n✅ Riattivato: successiva mail di riattivazione individuata.\n⚪ Non monitorato: fuori dai controlli attivi.\n\nIl monitor controlla ogni ora dalle 08:00 alle 21:00, ora italiana. Dopo la notifica della richiesta documento, la riattivazione viene cercata dalle 08:00 del giorno successivo, inclusa la posta arrivata nel frattempo.',buttons:[[bancoButton_('📊 Stato account','bn:root'),bancoButton_('🏠 Menu','bn:menu')]]};
+  if (bancoDashboardContext_) return segretarioHelp_();
+  return {text:'🏦 Guida del Banco\n\n/menu — apre il menu\n/correggi — corregge il tuo ultimo inserimento entro 60 minuti; reinvia poi il messaggio completo\n/annulla — esce dalla correzione\n/test — verifica i collegamenti configurati\n/id — mostra il tuo identificativo Telegram\n\nPer inserire un account invia il messaggio completo nel formato abituale. Le notifiche del monitor email continuano ad arrivare sul Banco. La consultazione degli account è disponibile su Il Segretario.',buttons:[[bancoButton_('🏠 Menu','bn:menu')]]};
 }
 
 function bancoBooks_() {
@@ -4791,10 +4795,11 @@ function bancoCounts_(accounts,item,mirror) {
   return '🟢 '+counts.active+'  🟠 '+counts.documents+'  ✅ '+counts.reactivated+'  ⚪ '+counts.unmonitored+(counts.unknown?'  🔵 '+counts.unknown:'');
 }
 function bancoRoot_() {
+  if (!bancoDashboardContext_) return bancoMoved_();
   const cache=CacheService.getScriptCache(),key='bn:root:'+BANCO_MENU_VERSION;
   if (!bancoForceRefresh_) {try {const hit=cache.get(key);if(hit) return JSON.parse(hit);} catch (_) {}}
   const mirror=bancoMirror_(),items=bancoSheets_(),buttons=[];
-  let text='📊 Stato account\n\n';let lastBook=null;
+  let text='📋 Il Segretario · Stato account\n\n';let lastBook=null;
   items.forEach(item=>{
     if (lastBook!==item.book) {text+='📁 '+item.bookTitle+'\n';lastBook=item.book;}
     const accounts=bancoAccounts_(item,false);
@@ -4808,6 +4813,7 @@ function bancoRoot_() {
   return view;
 }
 function bancoSheet_(bi,gid,requestedPage) {
+  if (!bancoDashboardContext_) return bancoMoved_();
   const item=bancoFindSheet_(bi,gid),mirror=bancoMirror_(),accounts=bancoAccounts_(item,false).slice().reverse();
   const pages=Math.max(1,Math.ceil(accounts.length/BANCO_PAGE_SIZE)),page=Math.min(requestedPage,pages-1);
   const batch=accounts.slice(page*BANCO_PAGE_SIZE,(page+1)*BANCO_PAGE_SIZE);
@@ -4822,6 +4828,7 @@ function bancoSheet_(bi,gid,requestedPage) {
   return {text:text,buttons:buttons};
 }
 function bancoAccount_(bi,gid,row,fingerprint,page) {
+  if (!bancoDashboardContext_) return bancoMoved_();
   const item=bancoFindSheet_(bi,gid),account=bancoAccounts_(item,true,row).find(a=>a.row===row);
   const back='bn:s:'+bi+':'+gid+':'+page;
   if (!account || account.fingerprint!==fingerprint) return {text:'La riga dell’account è cambiata. Apri di nuovo l’elenco per consultare i dati aggiornati.',buttons:[[bancoButton_('📋 Torna agli account',back)]]};
@@ -4848,12 +4855,12 @@ let bancoForceRefresh_ = false;
 
 function bancoChatRead_() {
   let s;
-  try {s=JSON.parse(PropertiesService.getScriptProperties().getProperty(BANCO_CHAT_KEY)||'{}');} catch (_) {s={};}
+  try {s=JSON.parse(PropertiesService.getScriptProperties().getProperty(bancoChatKey_())||'{}');} catch (_) {s={};}
   return {panel:Number(s.panel)||0,last:Number(s.last)||0,routines:Array.isArray(s.routines)?s.routines:[],retired:Array.isArray(s.retired)?s.retired:[]};
 }
 function bancoChatWrite_(s) {
   s.routines=s.routines.slice(-180);s.retired=s.retired.slice(-40);
-  PropertiesService.getScriptProperties().setProperty(BANCO_CHAT_KEY,JSON.stringify(s));
+  PropertiesService.getScriptProperties().setProperty(bancoChatKey_(),JSON.stringify(s));
 }
 function bancoChatLock_(fn) {
   const lock=LockService.getScriptLock();lock.waitLock(15000);
@@ -4929,7 +4936,7 @@ function bancoMonitorNotice_(notice) {
   return ContentService.createTextOutput(JSON.stringify({ok:true,message_id:notice.message_id,
     registered:'monitor_health',retention_hours:12,version:BANCO_MENU_VERSION})).setMimeType(ContentService.MimeType.JSON);
 }
-function bancoManutenzioneChat() {
+function bancoManutenzioneChatScope_() {
   bancoChatLock_(()=>{
     const s=bancoChatRead_(),now=Date.now();
     const latest=Math.max(0,...s.routines.filter(r=>r[2]==='r').map(r=>r[0]));
@@ -4954,4 +4961,77 @@ function bancoConfiguraManutenzione() {
 function bancoInvalidate_() {
   const cache=CacheService.getScriptCache();
   if (typeof cache.removeAll==='function') cache.removeAll(bancoBooks_().flatMap(b=>['Sisal Sport','PokerStars'].map(n=>'bn:'+BANCO_MENU_VERSION+':'+b.id+':'+n)).concat(['bn:root:'+BANCO_MENU_VERSION]));
+}
+
+
+// Il Segretario shares account data with Il Banco, with separate authentication,
+// Telegram tokens, update deduplication and chat lifecycle records.
+const SEGRETARIO_USERNAME = 'Il_SegretarioBot';
+const SEGRETARIO_CHAT_KEY = 'SEGRETARIO_CHAT_V1';
+const SEGRETARIO_WEBAPP = 'https://script.google.com/macros/s/AKfycbzYApZs3vAeAgIE-nsIGarBElHOO973FsEbrreBw6qNbCT9rj2D8MfO9cmQV-_J5B1e/exec';
+let bancoDashboardContext_ = false;
+
+function bancoTokenProperty_() {return bancoDashboardContext_?'DASHBOARD_TELEGRAM_TOKEN':'TELEGRAM_TOKEN';}
+function bancoChatKey_() {return bancoDashboardContext_?SEGRETARIO_CHAT_KEY:BANCO_CHAT_KEY;}
+function bancoConDashboard_(fn) {
+  const previous=bancoDashboardContext_;
+  try {bancoDashboardContext_=true;return fn();} finally {bancoDashboardContext_=previous;}
+}
+function bancoDashboardSnapshot_() {return bancoConDashboard_(()=>bancoChatRead_());}
+function bancoMoved_() {
+  return {text:'La consultazione degli account è ora disponibile su Il Segretario.\nIl Banco continua a ricevere gli account e gli avvisi del monitor email.',
+    buttons:[[{text:'Apri Il Segretario',url:'https://t.me/'+SEGRETARIO_USERNAME}],[bancoButton_('🏠 Menu Banco','bn:menu')]]};
+}
+function segretarioHelp_() {
+  return {text:'📋 Il Segretario\n\n/menu, /account o /stato — fogli e stato account\n/help — questa guida\n\nApri un account per consultare nome, username, email e stato. I pulsanti copiano username, password dell’account ed email. La password resta nascosta nel testo.\n\n🟢 Attivo: nessuna richiesta documenti rilevata.\n🟠 Richiesta documenti: mail individuata dal monitor.\n✅ Riattivato: successiva mail di riattivazione individuata.\n⚪ Non monitorato: fuori dai controlli attivi.\n\nGli account sono mostrati per foglio, dai più recenti ai più vecchi. Aggiorna rilegge i dati disponibili.\n\nInserimenti, correzioni e avvisi email restano sul Banco.',
+    buttons:[[bancoButton_('📊 Stato account','bn:root')]]};
+}
+function segretarioRiceviUpdate_(update) {
+  if (!update || (!update.message && !update.callback_query)) return;
+  if (typeof update.update_id!=='undefined' && !prenotaUpdate('segretario:'+String(update.update_id))) return;
+  if (!bancoGestisciUpdate(update)) {
+    const callback=update.callback_query,message=callback?callback.message:update.message;
+    const actor=callback?callback.from:message && message.from,chat=message && message.chat;
+    if (bancoPrivateAdmin_(actor,chat)) bancoRender_(chat,callback?message.message_id:null,segretarioHelp_());
+  }
+}
+function bancoManutenzioneChat() {
+  const previous=bancoDashboardContext_;
+  try {
+    bancoDashboardContext_=false;bancoManutenzioneChatScope_();
+    if (PropertiesService.getScriptProperties().getProperty('DASHBOARD_TELEGRAM_TOKEN'))
+      bancoConDashboard_(()=>bancoManutenzioneChatScope_());
+  } finally {bancoDashboardContext_=previous;}
+}
+// Run only after the new version has been published on the existing deployment.
+function configuraIlSegretario() {
+  const props=PropertiesService.getScriptProperties(),token=props.getProperty('DASHBOARD_TELEGRAM_TOKEN');
+  if (!token || token===props.getProperty('TELEGRAM_TOKEN')) throw new Error('Configura il token distinto del Segretario nelle proprietà private.');
+  return bancoConDashboard_(()=>{
+    const me=bancoApi_('getMe',{});
+    if (!me || me.username!==SEGRETARIO_USERNAME) throw new Error('Il token non appartiene al bot Il Segretario previsto.');
+    let secret=props.getProperty('DASHBOARD_WEBHOOK_SECRET');
+    if (!secret) {secret=Utilities.getUuid().replace(/-/g,'')+Utilities.getUuid().replace(/-/g,'');props.setProperty('DASHBOARD_WEBHOOK_SECRET',secret);}
+    const url=SEGRETARIO_WEBAPP+'?bot=dashboard&key='+encodeURIComponent(secret);
+    const before=bancoApi_('getWebhookInfo',{});
+    if (before.url && before.url!==url) throw new Error('Il nuovo bot ha già un collegamento differente: verificare prima di sostituirlo.');
+    bancoApi_('setWebhook',{url:url,max_connections:1,allowed_updates:['message','callback_query']});
+    const after=bancoApi_('getWebhookInfo',{});
+    if (after.url!==url) throw new Error('Collegamento del Segretario non confermato.');
+    bancoApi_('setMyCommands',{commands:[{command:'menu',description:'Apri gli account e il loro stato'},{command:'stato',description:'Riepilogo degli stati account'},{command:'help',description:'Guida del Segretario'}]});
+    console.log(JSON.stringify({ok:true,bot:me.username,private_admin_only:true,webhook_confirmed:true,version:BANCO_MENU_VERSION}));
+  });
+}
+function aggiornaMenuBanco() {
+  if (bancoDashboardContext_) throw new Error('Contesto Banco richiesto.');
+  const result=bancoRender_({id:String(ADMIN_TELEGRAM_ID)},null,bancoHome_());
+  console.log(JSON.stringify({ok:true,bot:'Il Banco',menu_message:result.message_id,state_account_entry:false}));
+}
+function verificaSeparazioneBot() {
+  const props=PropertiesService.getScriptProperties();
+  const main=bancoApi_('getMe',{}),dashboard=bancoConDashboard_(()=>bancoApi_('getMe',{}));
+  if (main.id===dashboard.id || dashboard.username!==SEGRETARIO_USERNAME) throw new Error('Identità dei bot non coerenti.');
+  const oldHome=bancoHome_();
+  if (oldHome.buttons.flat().some(b=>b.callback_data==='bn:root')) throw new Error('Stato account ancora presente nel menu Banco.');
+  console.log(JSON.stringify({ok:true,banco:main.username,segretario:dashboard.username,separate_chat_keys:BANCO_CHAT_KEY!==SEGRETARIO_CHAT_KEY,version:BANCO_MENU_VERSION}));
 }

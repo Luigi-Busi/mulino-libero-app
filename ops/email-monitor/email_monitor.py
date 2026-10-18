@@ -24,7 +24,7 @@ import time
 import unicodedata
 from zoneinfo import ZoneInfo
 
-VERSION = '1.3.1'
+VERSION = '1.3.2'
 RULES = {
  'sisal': ('info@sisal.it', "inviaci la copia del tuo documento d'identità"),
  'pokerstars': ('info@clienti.pokerstars.it', "inviaci il tuo documento d'identità"),
@@ -410,12 +410,11 @@ def notification(event,accounts,reactivation=False):
 class Telegram:
  def __init__(self,config):
   import requests
-  self.session=requests.Session();self.token=Path(config['telegram_token_file']).read_text().strip();self.chat=config['telegram_chat_id'];self.dashboard_button=bool(config.get('dashboard_status'));self.dashboard_target=config.get('dashboard_status',{})
+  self.session=requests.Session();self.token=Path(config['telegram_token_file']).read_text().strip();self.chat=config['telegram_chat_id'];self.dashboard_button=False;self.dashboard_target=config.get('dashboard_status',{})
  def send(self,text):
   # No requests logging / raise_for_status: URLs contain the secret token.
   try:
    payload={'chat_id':self.chat,'text':text,'link_preview_options':{'is_disabled':True}}
-   if getattr(self,'dashboard_button',False):payload['reply_markup']={'inline_keyboard':[[{'text':'📊 Stato account','callback_data':'bn:root'}]]}
    response=self.session.post(f'https://api.telegram.org/bot{self.token}/sendMessage',json=payload,timeout=(10,30))
   except Exception:return ('uncertain',None,0,'NETWORK_UNCERTAIN')
   try:body=response.json()
@@ -505,6 +504,10 @@ def publish_dashboard(config,state,client=None):
    snapshot=json.dumps({'saved_at':now(),'state':answer['chat_state']},separators=(',',':'))
    if len(snapshot)>8192:raise ValueError('Banco chat snapshot exceeds limit')
    with state.db:state.db.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('banco_chat_snapshot',?)",(snapshot,))
+  if isinstance(state,State) and isinstance(answer.get('dashboard_chat_state'),dict):
+   snapshot=json.dumps({'saved_at':now(),'state':answer['dashboard_chat_state']},separators=(',',':'))
+   if len(snapshot)>8192:raise ValueError('Segretario chat snapshot exceeds limit')
+   with state.db:state.db.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('segretario_chat_snapshot',?)",(snapshot,))
   return
  if client is None:
   import gspread
