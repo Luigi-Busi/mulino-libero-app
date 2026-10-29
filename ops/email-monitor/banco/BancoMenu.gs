@@ -1,8 +1,8 @@
 // Il Banco: private account dashboard. No credentials in logs/cache/callback_data.
-const BANCO_MENU_VERSION = '1.2.0';
+const BANCO_MENU_VERSION = '1.2.1';
 const BANCO_STATUS_TAB = 'Stato Account Banco';
 const BANCO_PAGE_SIZE = 8;
-const BANCO_COLORS = ['#ffffff','#ff00ff','#9900ff','#d9d2e9','#b4a7d6','#8e7cc3','#674ea7','#351c75','#20124d'];
+const BANCO_COLORS = ['#00ffff','#ffffff','#ff00ff','#9900ff','#d9d2e9','#b4a7d6','#8e7cc3','#674ea7','#351c75','#20124d'];
 
 // Manual commissioning check: only the configured administrator receives views.
 function bancoVerificaMenuPrivato() {
