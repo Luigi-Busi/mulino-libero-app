@@ -1,3 +1,7 @@
+# v1.3.18 - GoldBet archive
+
+Exclude GoldBet from active consistency scans when its sheet is archived. Explicit request destinations remain checked. No queue/data schema changes.
+
 ## v1.3.5 — ripresa esplicita delle richieste ignorate
 
 - Un /riprova accettato rimuove il vecchio contrassegno Ignora: un successivo errore della stessa richiesta rimane visibile nel recupero.
