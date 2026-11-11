@@ -94,6 +94,12 @@ class AdminChatCleanup:
             owner INTEGER NOT NULL, bot INTEGER NOT NULL, message INTEGER NOT NULL,
             sent_at INTEGER NOT NULL CHECK(sent_at>0),
             PRIMARY KEY(owner,bot,message))""")
+        db.execute("""CREATE TABLE IF NOT EXISTS admin_chat_observed (
+            owner INTEGER NOT NULL, bot INTEGER NOT NULL, message INTEGER NOT NULL,
+            sent_at INTEGER NOT NULL, PRIMARY KEY(owner,bot,message))""")
+        db.execute("""CREATE TABLE IF NOT EXISTS admin_recovery_headers (
+            owner INTEGER NOT NULL, bot INTEGER NOT NULL, message INTEGER NOT NULL,
+            PRIMARY KEY(owner,bot,message))""")
         self.lock = asyncio.Lock()
         self.retry_at = 0.0
 
@@ -123,6 +129,19 @@ class AdminChatCleanup:
             raise ValueError('Invalid registration notice metadata')
         self.db.execute('INSERT OR IGNORE INTO admin_registration_notice_history VALUES (?,?,?,?)',
                         (self.owner, bot, message, sent_at))
+
+    def observe_message(self, bot, message, sent_at):
+        if (not all(self.valid_id(v) for v in (self.owner, bot, message))
+                or type(sent_at) is not int or not 0 < sent_at <= time.time() + 60):
+            raise ValueError('Invalid observed message metadata')
+        self.db.execute('INSERT OR IGNORE INTO admin_chat_observed VALUES (?,?,?,?)',
+                        (self.owner, bot, message, sent_at))
+
+    def track_recovery_header(self, bot, message):
+        if not all(self.valid_id(v) for v in (self.owner, bot, message)):
+            raise ValueError('Invalid recovery header metadata')
+        self.db.execute('INSERT OR IGNORE INTO admin_recovery_headers VALUES (?,?,?)',
+                        (self.owner, bot, message))
 
     async def delete_known(self, bot, message):
         """True means removed or permanently unavailable; False keeps the durable job."""
@@ -158,7 +177,7 @@ class AdminChatCleanup:
                 or (delete_after is not None and (kind != 'usage' or type(delete_after) is not int or delete_after != 300))):
             raise ValueError('Invalid recovery metadata')
         now = int(time.time())
-        delay = (delete_after if delete_after is not None else 1800) if kind == 'usage' else 0
+        delay = (delete_after if delete_after is not None else 1800) if kind == 'usage' else 600
         self.db.execute('INSERT OR IGNORE INTO admin_recovery_messages VALUES (?,?,?,?,?,?,?)',
             (self.owner, bot, message, batch, kind, now, now + delay if delay else 0))
 
@@ -215,25 +234,30 @@ class AdminChatCleanup:
                     # A restored current-panel pointer is protected even if it was tracked wrongly.
                     self.db.execute('DELETE FROM admin_response_history WHERE owner=? AND bot=? AND message=?',
                                     (self.owner,bot.id,message))
-                # Independent category: keep the latest uncertain-registration notice.
+                # All explicitly tracked notices expire, including the latest.
                 rows = self.db.execute('''SELECT message,sent_at FROM admin_registration_notice_history
                     WHERE owner=? AND bot=? AND sent_at<=?
-                    AND message < (SELECT MAX(message) FROM admin_registration_notice_history
-                        WHERE owner=? AND bot=?)
                     ORDER BY sent_at,message LIMIT 8''',
-                    (self.owner,bot.id,now-43200,self.owner,bot.id)).fetchall()
+                    (self.owner,bot.id,now-43200)).fetchall()
                 for message, sent_at in rows:
                     current = current_message() if callable(current_message) else current_message
-                    latest = self.db.execute('''SELECT MAX(message) FROM admin_registration_notice_history
-                        WHERE owner=? AND bot=?''',(self.owner,bot.id)).fetchone()[0]
-                    if message == latest:
-                        continue
                     if (self.valid_id(message) and message != current
                             and now - 172800 < sent_at <= now - 43200):
                         if not await self.delete_known(bot, message):
                             return
                     self.db.execute('DELETE FROM admin_registration_notice_history WHERE owner=? AND bot=? AND message=?',
                                     (self.owner,bot.id,message))
+                # Exact observed message IDs, not ID gaps; duplicates/edits cannot add to the count.
+                self.db.execute('''UPDATE admin_recovery_messages SET delete_at=MIN(delete_at,?)
+                    WHERE owner=? AND bot=? AND message IN (
+                        SELECT h.message FROM admin_recovery_headers h WHERE h.owner=? AND h.bot=?
+                        AND (SELECT COUNT(*) FROM admin_chat_observed o
+                            WHERE o.owner=h.owner AND o.bot=h.bot AND o.message>h.message)>=5)''',
+                    (now,self.owner,bot.id,self.owner,bot.id))
+                # Also expire lists created by an older version, with their recorded delivery time.
+                self.db.execute('''UPDATE admin_recovery_messages SET delete_at=sent_at+600
+                    WHERE owner=? AND bot=? AND kind IN ('list','confirm')
+                    AND (delete_at=0 OR delete_at>sent_at+600)''', (self.owner,bot.id))
                 # Only observed recovery messages; no chat history scan or message text.
                 self.db.execute('DELETE FROM admin_recovery_messages WHERE owner=? AND bot=? AND sent_at<=?',
                                 (self.owner, bot.id, now - 172800))
@@ -247,6 +271,11 @@ class AdminChatCleanup:
                             return
                     self.db.execute('DELETE FROM admin_recovery_messages WHERE owner=? AND bot=? AND message=?',
                                     (self.owner, bot.id, message))
+                self.db.execute('DELETE FROM admin_chat_observed WHERE owner=? AND bot=? AND sent_at<=?',
+                                (self.owner,bot.id,now-172800))
+                self.db.execute('''DELETE FROM admin_recovery_headers WHERE owner=? AND bot=?
+                    AND message NOT IN (SELECT message FROM admin_recovery_messages WHERE owner=? AND bot=?)''',
+                    (self.owner,bot.id,self.owner,bot.id))
             except sqlite3.Error:
                 self.retry_at = time.monotonic() + 10
                 LOGGER.warning('Registro della pulizia amministrativa non disponibile')

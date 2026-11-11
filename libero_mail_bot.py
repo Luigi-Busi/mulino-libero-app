@@ -44,6 +44,7 @@ from zipfile import ZipFile, ZIP_DEFLATED
 import gspread
 from browser_diagnostics import BrowserDiagnostics, error_kind
 from runtime_health import HealthRequest, RuntimeHealth
+from admin_message_observer import CleanupBot, observe_incoming
 from telegram_panel import PanelReply, PanelSessions, ReusablePanel, controls_text, keyboard as panel_keyboard
 from dotenv import load_dotenv
 from gspread.utils import rowcol_to_a1
@@ -3914,7 +3915,7 @@ async def render_admin_panel(coordinator: Coordinator, message: Any, *, text: Op
                 text=text, reply_markup=markup, disable_web_page_preview=True)
         if (panel.message_id(coordinator.bot.id) != sent.message_id or panel.persistence_error):
             panel.bind(coordinator.bot.id, sent.message_id,
-                       retired_message=message_id if force_new else None)
+                       retired_message=message_id)
         if force_new and message_id and message_id != sent.message_id:
             coordinator.panel_sessions.entries = {k:v for k,v in coordinator.panel_sessions.entries.items()
                 if (v['chat'],v['message']) != (coordinator.settings.admin_id,message_id)}
@@ -4331,11 +4332,13 @@ def clear_recovery_ignore(coordinator: Coordinator, request_id: str) -> None:
 
 
 async def recovery_reply(coordinator: Coordinator, source: Any, text: str, *,
-                         batch: str, kind: str = "list", **kwargs: Any) -> Any:
+                         batch: str, kind: str = "list", header: bool = False, **kwargs: Any) -> Any:
     sent = await source.reply_text(text, **kwargs)
     try:
         if sent.chat.id == coordinator.settings.admin_id:
             coordinator.panel.cleanup.track_recovery(coordinator.bot.id, sent.message_id, batch, kind)
+            if header:
+                coordinator.panel.cleanup.track_recovery_header(coordinator.bot.id, sent.message_id)
     except (sqlite3.Error, ValueError):
         LOGGER.warning("Messaggio recupero inviato; pulizia non registrata")
     return sent
@@ -4401,7 +4404,7 @@ async def recovery_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             + ("Richieste ignorate" if ignored_view else "Recupero richieste")
             + f" — pagina {page_number}/{(len(requests) + 4) // 5}\n"
             "I pulsanti scadono dopo 10 minuti. Per aggiornare usa /recupera.\n"
-            "Per rivedere le richieste nascoste: /recupera ignorate.", batch=batch
+            "Per rivedere le richieste nascoste: /recupera ignorate.", batch=batch, header=True
         )
         for request in selected:
             text = (f"{request.destination_sheet} — riga {request.destination_row}\n"
@@ -5015,6 +5018,8 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 async def post_init(application: Application) -> None:
     coordinator: Coordinator = application.bot_data["coordinator"]
     coordinator.application = application
+    if isinstance(application.bot, CleanupBot):
+        application.bot.attach_cleanup(coordinator.panel.cleanup)
     try:
         recovered = await asyncio.to_thread(coordinator.store.recover_interrupted, coordinator.outcomes.ids())
     except Exception:
@@ -5136,8 +5141,7 @@ def main() -> None:
 
     application = (
         Application.builder()
-        .token(settings.telegram_token)
-        .get_updates_request(HealthRequest(coordinator.health))
+        .bot(CleanupBot(settings.telegram_token, get_updates_request=HealthRequest(coordinator.health)))
         .post_init(post_init)
         .post_shutdown(post_shutdown)
         .concurrent_updates(False)
@@ -5145,6 +5149,7 @@ def main() -> None:
     )
     application.bot_data["coordinator"] = coordinator
     application.add_error_handler(error_handler)
+    application.add_handler(MessageHandler(filters.ALL, observe_incoming), group=-1)
     application.add_handler(CommandHandler("start", admin_command(start_command)))
     application.add_handler(CommandHandler(["menu", "pannello"], admin_command(panel_command)))
     application.add_handler(CommandHandler(["conteggio", "conteggi", "azzera"], admin_command(tester_command)))

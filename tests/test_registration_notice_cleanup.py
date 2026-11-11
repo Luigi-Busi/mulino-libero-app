@@ -35,16 +35,16 @@ class NoticeCleanupTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([x.kwargs['message_id'] for x in self.bot.delete_message.call_args_list],[50,40])
         with patch('telegram_panel.time.time',return_value=NOW+43200):
             await self.c.drain(self.bot,None)
-        self.assertEqual(self.ids(),[42])
+        self.assertEqual(self.ids(),[])
         self.assertEqual([r[0] for r in self.db.execute('SELECT message FROM admin_response_history')],[51])
 
-    async def test_last_notice_survives_weeks_and_old_metadata_is_not_deleted_on_telegram(self):
+    async def test_last_notice_expires_and_old_metadata_is_not_deleted_on_telegram(self):
         self.add(40,172800);self.add(41,172799);self.add(42,0)
         await self.c.drain(self.bot,None)
         self.assertEqual([x.kwargs['message_id'] for x in self.bot.delete_message.call_args_list],[41])
         with patch('telegram_panel.time.time',return_value=NOW+20*86400):
             await self.c.drain(self.bot,None)
-        self.assertEqual(self.ids(),[42])
+        self.assertEqual(self.ids(),[])
         self.assertEqual(self.bot.delete_message.await_count,1)
 
     async def test_out_of_order_duplicates_and_current_panel_owner_bot_protection(self):

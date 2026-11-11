@@ -89,14 +89,17 @@ class TesterTimeoutTests(unittest.IsolatedAsyncioTestCase):
     async def test_resend_does_not_extend_deadline(self):
         await self.assigned()
         c = self.coordinator
-        deadline = asyncio.get_running_loop().time() + .05
+        deadline = asyncio.get_running_loop().time() + 300
         c.tester_sms_deadline = deadline
         c.last_sms_request_at -= 21
         self.assertTrue(c.queue_sms_resend(self.request.request_id, 11,
                                          token=c.assignment_token)[0])
-        resend = AsyncMock()
-        with self.assertRaises(worker.TesterChangeRequested):
-            await asyncio.wait_for(c.request_otp(self.request, resend=resend), 1)
+        async def complete_resend():
+            self.assertEqual(c.tester_sms_deadline, deadline)
+            # Deliver a synthetic code after the resend starts, without a 50ms race.
+            c.otp_future.set_result("123456")
+        resend = AsyncMock(side_effect=complete_resend)
+        self.assertEqual(await asyncio.wait_for(c.request_otp(self.request, resend=resend), 2), "123456")
         resend.assert_awaited_once()
         self.assertEqual(c.tester_sms_deadline, deadline)
         self.assertFalse(c.resend_busy)

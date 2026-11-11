@@ -10,6 +10,32 @@ si installa nella sottocartella `app`. Non sostituire il tuo `.env` con
 
 ## Cosa fa
 
+### Pulizia della chat privata: v1.3.19
+
+`/menu` conserva il nuovo pannello e accoda la rimozione del precedente;
+anche la sostituzione automatica di un pannello non modificabile ritira il vecchio.
+Telegram non consente normalmente al bot di cancellare messaggi oltre 48 ore:
+i pannelli storici non eliminabili vanno rimossi manualmente.
+
+Gli elenchi e le conferme di `/recupera` scadono dopo dieci minuti, come i pulsanti.
+L’intestazione sparisce anche prima quando sono stati osservati cinque messaggi
+successivi, del bot o dell’amministratore, comprese le schede appena inviate.
+Modifiche, clic sui pulsanti e aggiornamenti duplicati non aumentano il conteggio.
+Si contano messaggi reali, non differenze fra i loro identificativi.
+
+Scadono dopo dodici ore tutti gli avvisi indicati: attesa per attività anomala,
+richiesta nascosta, richiesta manuale già esistente, username mancante/non valido,
+esito della registrazione da verificare e istruzioni `Usa /creamail Nome | Cognome`.
+Anche l’ultimo di questi avvisi viene eliminato: questa regola sostituisce
+l’eccezione v1.3.15. Le conferme con l’indirizzo della mail creata restano conservate.
+
+Si registrano solo ID e date nella chat privata dell’amministratore. Scadenze
+e conteggi persistono ai riavvii e nei backup; i vecchi elenchi già registrati
+ricevono la scadenza di dieci minuti. Nessuna scansione della cronologia:
+i vecchi messaggi privi di metadati non possono essere individuati automaticamente.
+La cancellazione avviene nel ciclo di pulizia, con ritenti in caso di rete assente.
+
+
 ### Clic iniziale annullato dal sito: v1.3.17
 
 Dopo l’Avanti aggiuntivo, un solo nuovo tentativo è ammesso quando il sito ha
