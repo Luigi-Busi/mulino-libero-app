@@ -55,5 +55,5 @@ async def observe_incoming(update, context):
     coordinator = context.application.bot_data['coordinator']
     # New messages only: edits and callback button presses must not count twice.
     observe_message(coordinator.panel.cleanup, coordinator.bot.id, update.message)
-    await coordinator.panel.cleanup.drain(coordinator.bot,
-        lambda: coordinator.panel.message_id(coordinator.bot.id))
+    # Existing queue-loop cleanup performs network calls independently of handlers.
+    # Never delay an OTP or a command while waiting for administrative deletions.

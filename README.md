@@ -10,7 +10,7 @@ si installa nella sottocartella `app`. Non sostituire il tuo `.env` con
 
 ## Cosa fa
 
-### Pulizia della chat privata: v1.3.19
+### Pulizia della chat privata: v1.3.20
 
 `/menu` conserva il nuovo pannello e accoda la rimozione del precedente;
 anche la sostituzione automatica di un pannello non modificabile ritira il vecchio.

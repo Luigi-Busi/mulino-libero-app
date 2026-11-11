@@ -111,6 +111,7 @@ class ExpiryTests(unittest.IsolatedAsyncioTestCase):
         await observe_incoming(NS(message=self.msg(40)),ctx)
         await observe_incoming(NS(message=None),ctx)
         self.assertEqual(self.db.execute('SELECT message FROM admin_chat_observed').fetchall(),[(40,)])
+        self.bot.delete_message.assert_not_awaited()
 
     async def test_old_uneditable_panel_is_retired_after_replacement(self):
         import test_telegram_panel as panels
