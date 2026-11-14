@@ -1637,6 +1637,51 @@ class RegistrationBrowser:
                 raise RegistrationError("Il browser è stato chiuso durante il cambio tester.")
             return False
 
+    async def _find_sms_dialog_close(self) -> Optional[Locator]:
+        """Recognize the Libero SMS dialog before considering its close control.
+
+        Inspect labels and structure; never inspect input values or return page text.
+        A generic page close/back control is not a number-change operation.
+        """
+        otp = await self._find_otp_input(require_editable=False)
+        if otp is None:
+            return None
+        ancestors = await otp.locator('xpath=ancestor::*').all()
+        for dialog in reversed(ancestors):
+            recognized = await dialog.evaluate(r"""el => {
+                const text = (el.innerText || '').replace(/\s+/g, ' ').trim();
+                return /VERIFICA DEL TUO ACCOUNT/i.test(text)
+                    && /inserisci il codice di conferma che abbiamo inviato al numero/i.test(text)
+                    && /non hai ricevuto il codice/i.test(text)
+                    && /invia di nuovo/i.test(text)
+                    && !/registrati|non presto il consenso/i.test(text)
+                    && !el.querySelector('#username, #password');
+            }""")
+            if not recognized:
+                continue
+            if await dialog.get_by_text('VERIFICA DEL TUO ACCOUNT', exact=True).count() != 1:
+                return None
+            avanti = dialog.get_by_role('button', name='AVANTI', exact=True)
+            if not await avanti.count():
+                avanti = dialog.get_by_role('link', name='AVANTI', exact=True)
+            if await avanti.count() != 1 or not await avanti.is_visible():
+                return None
+            controls = []
+            for control in await dialog.locator(
+                'button, a, [role="button"], input[type="button"], .close, [aria-label], [title]'
+            ).all():
+                if not await control.is_visible() or not await control.is_enabled():
+                    continue
+                is_close = await control.evaluate(r"""el => {
+                    const labels = [el.getAttribute('aria-label'), el.getAttribute('title'), el.textContent];
+                    return labels.some(t => /^(?:×|✕|✖|x|chiudi(?: finestra)?|close)$/i.test((t || '').trim()));
+                }""")
+                if is_close:
+                    controls.append(control)
+            # Do not search a larger ancestor if this dialog is ambiguous.
+            return controls[0] if len(controls) == 1 else None
+        return None
+
     async def _return_to_phone_form(self, request: QueueRequest) -> None:
         assert self.page
         if await self._phone_edit_ready():
@@ -1646,11 +1691,15 @@ class RegistrationBrowser:
         )
         candidates = []
         for frame in self.page.frames:
-            # Solo controlli espliciti. Mai X, Indietro generico o Registrati.
+            # Prefer explicit number-change controls over a recognized SMS close.
             for role in ("button", "link"):
                 for candidate in await frame.get_by_role(role, name=label).all():
                     if await candidate.is_visible() and await candidate.is_enabled():
                         candidates.append(candidate)
+        if not candidates:
+            close = await self._find_sms_dialog_close()
+            if close is not None:
+                candidates.append(close)
         if len(candidates) == 1:
             try:
                 await self._check_cancelled()
