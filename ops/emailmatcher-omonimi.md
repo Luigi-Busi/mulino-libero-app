@@ -1,5 +1,27 @@
 # EmailMatcher: omonimi e attivazione della v1.3.21
 
+## Stato verificato
+
+Aggiornamento installato il 14 novembre 2026 alle 09:48, ora italiana.
+Pubblicazione Apps Script aggiornata dalla versione 38 alla 39 sul deployment
+web esistente. Codice, ProvaMugnaio, RecuperoEmailMancanti e manifest sono
+rimasti identici alla copia privata precedente; URL, identità di esecuzione
+e livello di accesso del deployment sono stati verificati invariati.
+
+SHA-256 di EmailMatcher pubblicato:
+2f60b7cebaeaf9cf1b01c8dc4cc37f0b9de380e15ef992c67abdcaf35eb90da4.
+
+Riletti sorgenti HEAD e sorgenti della versione 39: entrambi coincidono con
+il file verificato. Il Banco ha risposto HTTP 200 con il normale messaggio
+di disponibilità. Il controllo non ha inviato comandi Telegram né avviato
+creazioni mail. Nessun aggiornamento del worker/VPS è stato necessario.
+I 72 casi del matcher e l'integrazione unittest sono superati.
+
+Il proprietario ha completato personalmente il consenso Google ai due soli
+permessi Apps Script projects e deployments. La credenziale resta privata
+sul PC, fuori dal repository; non è inclusa in questo documento.
+
+
 ## Analisi dei campi disponibili
 
 Il progetto Google Auto-Ricezione Dati è stato letto tramite Apps Script API

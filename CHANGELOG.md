@@ -1,5 +1,7 @@
 ## v1.3.21 — 14 novembre 2026 — omonimi in EmailMatcher
 
+Pubblicato nel progetto Apps Script come versione 39; indirizzo e accessi conservati.
+
 - Stesso nome normalizzato e stesso sito: nuova mail entro 20 giorni solo con
   username diversi e affidabili, date interpretabili e registrazioni confermate valide.
 - Oltre 20 giorni, dati incompleti, duplicati e correzioni: blocco, revisione nel file
