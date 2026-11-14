@@ -1,5 +1,7 @@
 ## v1.3.22 — 14 novembre 2026 — scelta degli omonimi in Telegram
 
+Pubblicato come versione 40 di Apps Script, con lettura di verifica dei sorgenti e del deployment.
+
 - Avvisi del Banco con mail trovate, paginazione e pulsante per una nuova mail.
 - Scelta e conferma in chat: decisione persistente, assegnazione o richiesta al Mugnaio.
 - Controlli su proprietario, messaggio, identità stabile, contesto e vecchi pulsanti.

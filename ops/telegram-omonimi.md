@@ -1,5 +1,25 @@
 # Revisione degli omonimi da Telegram — v1.3.22
 
+## Pubblicazione verificata
+
+Installato il 14 novembre 2026 alle 10:23, ora italiana, come versione 40 di Apps Script
+(versione precedente: 39) sul deployment esistente. Riletti HEAD e sorgenti della
+versione pubblicata: coincidono con i file verificati. In Codice.gs è stato aggiunto
+soltanto il collegamento descritto nel file hook; manifest e altri tre file conservati.
+URL, identità di esecuzione e accessi del deployment sono invariati.
+
+SHA-256 EmailMatcher:
+4f0bf1a5d1d97e1f7282961091f536225291f6d39fb834c664df025b06476503.
+
+SHA-256 Codice.gs con il solo collegamento:
+2f5193cdf4f8bfcf71a1417ed93dd96f0c1c3791d0910a9cc54616202abf7855.
+
+I controlli sulle API Google hanno confermato la pubblicazione. Il controllo HTTP
+anonimo della web app da questa macchina non è stato eseguibile per un errore DNS
+locale (ENOTFOUND su script.google.com); non viene presentato come test superato.
+I clic e gli effetti sui fogli sono stati collaudati con servizi simulati, senza
+spedire notifiche di prova o creare account reali.
+
 ## Uso quotidiano
 
 L'avviso privato di Il Banco mostra nome, foglio, riga, username e mail trovate,
