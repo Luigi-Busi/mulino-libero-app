@@ -2,16 +2,29 @@
 
 ## Analisi dei campi disponibili
 
-Baseline del repository: main, commit 94201da (v1.3.20). Il matcher precedente
-riconosceva solo Nome/Cognome ed E-mail, cercava globalmente per nome e usava
-automaticamente l'unico indirizzo trovato. Non conservava identità delle registrazioni.
+Il progetto Google Auto-Ricezione Dati è stato letto tramite Apps Script API
+dopo consenso personale del proprietario il 14 novembre 2026.
+Baseline verificata: versione pubblicata 38; sorgenti salvati e versione pubblicata
+coincidevano. Copia privata completa conservata prima di qualsiasi aggiornamento.
 
-Il repository non include il codice di Il Banco né un export dei fogli reali.
-È stato confrontato anche il riferimento locale disponibile del suo Codice.gs:
-trovaIntestazioniStandard riconosce Data apertura / Data di apertura,
-Nome e Cognome / Nome Cognome, Username / User / Nome utente, Password e Provenienza.
-scriviRiga inserisce Data apertura come dd/MM/yyyy solo per i nuovi inserimenti;
-correggiUltimo riscrive la stessa riga senza introdurre una nuova data di apertura.
+La copia del repository iniziale non comprendeva modifiche già in uso:
+Coda con 18 campi (ID_ACCOUNT), ID_MULINO nei fogli e gestione dei nomi d'archivio.
+La versione definitiva integra le regole degli omonimi su questa baseline:
+accodamento, ricerca delle richieste stabili, migrazione degli ID e risolutore
+degli archivi sono conservati.
+
+Il codice corrente di Il Banco riconosce Data apertura / Data di apertura,
+Nome e Cognome / Nome Cognome, Username / User / Nome utente.
+Le intestazioni reali sono state rilette:
+- Sisal Sport: riga 8, Data Apertura A, Nome Cognome D, Username E,
+  E-mail G e ID_MULINO R.
+- PokerStars: riga 9, stessi campi in A/D/E/G e ID_MULINO P.
+- Coda: 18 intestazioni, con ID_ACCOUNT in posizione 18.
+
+scriviRiga inserisce Data apertura come dd/MM/yyyy per i nuovi inserimenti;
+la correzione conserva la stessa riga. Nessuna colonna è stata inventata.
+Le destinazioni attive restano PokerStars, Sisal Sport e MyLotteriesPlay;
+Snai Sport resta una sorgente d'archivio, come nel progetto corrente.
 
 Non è stato trovato un campo che certifichi il completamento del conto sul sito.
 Il proprietario ha confermato in questa sessione che inserisce solo conti già aperti.
@@ -24,7 +37,9 @@ Password e provenienza non partecipano alle decisioni e non vengono conservate n
 ## Comportamento
 
 1. Nome normalizzato uguale e foglio/sito normalizzato uguale: si confrontano
-   tutte le altre registrazioni, anche senza email e negli archivi configurati.
+   tutte le altre registrazioni, anche senza email. Gli archivi rinominati
+   riconosciuti possono bloccare un riuso dubbio: non autorizzano mai una
+   deduzione temporale tra fogli con nomi diversi.
 2. Nei tre siti configurati, username affidabili e diversi, entrambe le righe valide
    e differenza assoluta tra Data apertura di massimo 20 giorni: persone distinte,
    nessun riuso di email, una richiesta nella normale Coda.
@@ -46,9 +61,11 @@ Password e provenienza non partecipano alle decisioni e non vengono conservate n
 
 ## Correzioni e memoria
 
-La prima elaborazione reale di una destinazione assegna un UUID nei metadati
+Le destinazioni attive riusano ID_MULINO già previsto dal sistema e ID_ACCOUNT
+nella coda. Per la memoria degli omonimi viene inoltre conservato un UUID nei metadati
 dell'intera riga, distinto per colonna Nome quando ci sono più blocchi.
-Non viene aggiunta alcuna colonna al foglio. La stessa riga non è un nuovo candidato.
+Non viene introdotta una nuova colonna per gli omonimi; la normale inizializzazione
+di ID_MULINO conserva il comportamento già in uso. La stessa riga non è un nuovo candidato.
 Una firma di nome, username e data consente di riconoscere successive correzioni;
 l'identità non dipende dalla password. Spostamenti di righe intere che conservano
 i metadati conservano l'identità; copie/incolla dei soli valori o spostamenti di colonne
@@ -141,9 +158,11 @@ deve essere riconfermata. Le API manuali usano lo stesso lock del matcher.
 
 ### Esito locale — 14 novembre 2026
 
-- 64 casi JavaScript di regressione sul matcher: tutti superati.
+- 72 casi JavaScript di regressione sulla versione definitiva integrata con il progetto Google: tutti superati.
 - Integrazione tramite unittest (test_emailmatcher.py): superata.
-- Suite applicativa completa: 289 test, 287 superati e 2 errori di ambiente Windows.
+- Suite applicativa generale verificata inizialmente: 289 test, 287 superati e 2 errori di ambiente Windows.
+  Il worker non è stato modificato; dopo l’allineamento Google sono stati rieseguiti
+  i test del matcher e la loro integrazione nella suite di deploy.
   I due test esistenti non sono stati modificati:
   - test_telegram_panel.ControlsTests.test_missing_malformed_oversized_or_symlink_report_is_not_healthy:
     WinError 1314, creazione di link simbolici non autorizzata dal sistema.
@@ -152,10 +171,11 @@ deve essere riconfermata. Le API manuali usano lo stesso lock del matcher.
 - Ambiente locale: Python 3.14, dipendenze esatte di requirements.txt; tzdata aggiunto
   solo nell'ambiente di test Windows. Il sistema Linux di produzione fornisce i fusi orari.
 - Sintassi Apps Script verificata con Node e git diff --check senza errori.
-- Nessun accesso ai fogli live, nessuna notifica reale e nessun deploy eseguito.
-- Prima del rilascio finale occorre eseguire il controllo nel normale ambiente Linux
-  di deploy e il collaudo Apps Script: i test simulati non certificano autorizzazioni
-  Google, conservazione dei metadati durante operazioni manuali o configurazione del Banco.
+- Verificati in sola lettura progetto e pubblicazione correnti, intestazioni e stati della coda.
+  Nessuna funzione di creazione mail è stata avviata per il collaudo.
+- Il controllo Linux di mulino-deploy riguarda un eventuale aggiornamento del worker.
+  Questa modifica si attiva nel progetto Apps Script. La pubblicazione richiede
+  confronto dei sorgenti, conservazione degli altri file e verifica del deployment.
 
 Preparare e pubblicare commit/tag con la procedura Git già presente; non spostare tag
 esistenti. Il normale mulino-deploy check verifica il tag e i test offline.

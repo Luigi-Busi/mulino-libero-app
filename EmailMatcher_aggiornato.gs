@@ -66,7 +66,8 @@ const EM_CODA_HEADERS = [
   "TENTATIVI",
   "ERRORE",
   "MESSAGGIO_GRUPPO_ID",
-  "NOTE"
+  "NOTE",
+  "ID_ACCOUNT"
 ];
 
 const EM_WHITELIST_HEADERS = [
@@ -95,9 +96,7 @@ const EM_TEST_TARGET_ROW = 0;
 const EM_TARGET_SHEETS = [
   "PokerStars",
   "Sisal Sport",
-  "GoldBet",
-  "MyLotteriesPlay",
-  "Snai Sport"
+  "MyLotteriesPlay"
 ];
 
 
@@ -114,12 +113,8 @@ const EM_SOURCE_GROUPS = [
     sheets: [
       "PokerStars",
       "Sisal Sport",
-      "GoldBet",
       "MyLotteriesPlay",
       "Sisal Lott.",
-
-      // NUOVO FOGLIO SNAI
-      "Snai Sport",
 
       // VECCHIO FOGLIO:
       // resta utilizzabile come archivio e-mail
@@ -134,11 +129,15 @@ const EM_SOURCE_GROUPS = [
     label: "Archivio Matched",
 
     sheets: [
-      "MyLotteriesPlay",
+      "MyLotteriesPlay Old",
       "Sisal Old",
       "Sisal Old 2",
-      "PokerStars",
-      "LottoGold"
+      "PokerStars Old",
+      "LottoGold Old",
+      "GoldBet Old",
+
+      // SNAI: solo archivio email, nessun nuovo inserimento.
+      "Snai Sport"
     ]
   },
 
@@ -1164,10 +1163,10 @@ function EM_costruisciIndiceEmail(
       const nomeFoglio of gruppo.sheets
     ) {
 
-      const foglio =
-        ss.getSheetByName(
-          nomeFoglio
-        );
+      const sorgente = EM_risolviSorgenteArchiviata_(
+        ss, gruppo, nomeFoglio, props, spreadsheetCache
+      );
+      const foglio = sorgente.foglio;
 
 
       if (!foglio) {
@@ -1185,7 +1184,7 @@ function EM_costruisciIndiceEmail(
       EM_aggiungiFoglioAllIndice(
         indice,
         foglio,
-        gruppo.label
+        sorgente.label
       );
     }
   }
@@ -1374,7 +1373,8 @@ function EM_trovaTabelleSorgente(
           usernameCol: EM_colonnaUnica_(valori[r], nameCols, nameCol,
             ["username", "user", "nome utente"]),
           dateCol: EM_colonnaUnica_(valori[r], nameCols, nameCol,
-            ["data apertura", "data di apertura"])
+            ["data apertura", "data di apertura"]),
+          idCol: EM_colonnaUnica_(valori[r], nameCols, nameCol, ["id mulino"])
         });
       }
     }
@@ -2187,63 +2187,14 @@ function EM_accodaCreazioneMail(
   );
 
 
-  const ultimaRiga =
-    coda.getLastRow();
-
-
-  if (ultimaRiga > 1) {
-
-    const valori =
-      coda
-        .getRange(
-          2,
-          1,
-          ultimaRiga - 1,
-          EM_CODA_HEADERS.length
-        )
-        .getDisplayValues();
-
-
-    for (
-      let i = 0;
-      i < valori.length;
-      i++
-    ) {
-
-      const riga =
-        valori[i];
-
-
-      const stessaDestinazione =
-        String(riga[4]) ===
-          String(targetSpreadsheetId) &&
-        String(riga[5]) ===
-          String(nomeFoglio) &&
-        Number(riga[6]) ===
-          Number(numeroRiga);
-
-
-      const stato =
-        String(
-          riga[3] ||
-          ""
-        ).trim();
-
-
-      if (
-        stessaDestinazione &&
-        EM_STATI_CODA_CHIUSI.indexOf(
-          stato
-        ) === -1
-      ) {
-
-        return String(
-          riga[0]
-        );
-      }
-    }
-  }
-
+  const destinazione = SpreadsheetApp.openById(targetSpreadsheetId).getSheetByName(nomeFoglio);
+  if (!destinazione) throw new Error("Foglio account non trovato.");
+  const accountId = EM_identitaAccount(destinazione, Number(numeroRiga), nomeCompleto, true);
+  const ultimaRiga = coda.getLastRow();
+  const valori = ultimaRiga > 1
+    ? coda.getRange(2, 1, ultimaRiga - 1, EM_CODA_HEADERS.length).getDisplayValues() : [];
+  const esistente = EM_cercaRichiestaAccount(valori, targetSpreadsheetId, nomeFoglio, numeroRiga, nomeCompleto, accountId);
+  if (esistente) return esistente;
 
   const adesso =
     EM_dataOra();
@@ -2270,7 +2221,8 @@ function EM_accodaCreazioneMail(
     0,
     "",
     "",
-    ""
+    "",
+    accountId
   ]];
 
 
@@ -2330,6 +2282,17 @@ function EM_preparaFoglioSistema(
     );
   }
 
+
+  if (intestazioni === EM_CODA_HEADERS && foglio.getLastRow() > 0) {
+    const attuali = foglio.getRange(1, 1, 1, intestazioni.length).getDisplayValues()[0];
+    const vecchie = intestazioni.slice(0, -1);
+    const legacy = vecchie.every(function (v, i) { return String(attuali[i]).trim() === v; });
+    if (legacy && String(attuali[intestazioni.length - 1] || "").trim() === "") {
+      const extra = foglio.getRange(1, intestazioni.length, Math.max(1, foglio.getLastRow()), 1).getDisplayValues();
+      if (extra.some(function (r) { return String(r[0]).trim() !== ""; })) throw new Error("Colonna ID_ACCOUNT occupata: migrazione interrotta.");
+      foglio.getRange(1, intestazioni.length).setValue("ID_ACCOUNT");
+    }
+  }
 
   if (
     foglio.getLastRow() === 0 ||
@@ -2434,6 +2397,171 @@ function EM_verificaIntestazioniSistema(
 
 
 // ============================================================
+// IDENTIFICATIVI STABILI DELLE RIGHE ACCOUNT
+// ============================================================
+// Non modificare/copiare ID_MULINO. Ordinare sempre righe complete, inclusa
+// questa colonna. La migrazione va eseguita con il Mugnaio in pausa.
+
+function EM_colonnaIdAccount(foglio, tabella, crea) {
+  const larghezza = Math.max(1, foglio.getLastColumn());
+  const header = foglio.getRange(tabella.headerRow, 1, 1, larghezza).getDisplayValues()[0];
+  const colonne = [];
+  header.forEach(function (v, i) { if (String(v).trim() === "ID_MULINO") colonne.push(i + 1); });
+  if (colonne.length > 1) throw new Error("ID_MULINO duplicato nel foglio " + foglio.getName());
+  if (colonne.length) return colonne[0];
+  if (!crea) return 0;
+  const colonna = larghezza + 1;
+  if (colonna > foglio.getMaxColumns()) foglio.insertColumnsAfter(foglio.getMaxColumns(), colonna - foglio.getMaxColumns());
+  foglio.getRange(tabella.headerRow, colonna).setValue("ID_MULINO").setFontWeight("bold");
+  return colonna;
+}
+
+function EM_identitaAccount(foglio, numeroRiga, nomeCompleto, crea) {
+  const tabella = EM_trovaTabellaDestinazione(foglio);
+  if (numeroRiga <= tabella.headerRow || numeroRiga > foglio.getLastRow()) throw new Error("Riga account non valida.");
+  const nomeAttuale = String(foglio.getRange(numeroRiga, tabella.nameCol).getDisplayValue()).trim();
+  if (!nomeAttuale || EM_normalizzaNome(nomeAttuale) !== EM_normalizzaNome(nomeCompleto)) {
+    throw new Error("La riga account e cambiata: accodamento interrotto.");
+  }
+  const colonna = EM_colonnaIdAccount(foglio, tabella, crea);
+  if (!colonna) return "";
+  let id = String(foglio.getRange(numeroRiga, colonna).getDisplayValue()).trim();
+  if (!id && crea) {
+    id = Utilities.getUuid();
+    foglio.getRange(numeroRiga, colonna).setNumberFormat("@").setValue(id);
+    SpreadsheetApp.flush();
+  }
+  if (id) {
+    const righe = foglio.getRange(tabella.headerRow + 1, colonna, foglio.getLastRow() - tabella.headerRow, 1).getDisplayValues();
+    if (righe.filter(function (r) { return String(r[0]).trim() === id; }).length !== 1) {
+      throw new Error("ID_MULINO duplicato: nessuna nuova richiesta.");
+    }
+  }
+  return id;
+}
+
+function EM_cercaRichiestaAccount(valori, spreadsheetId, nomeFoglio, numeroRiga, nomeCompleto, accountId) {
+  const candidati = [];
+  valori.forEach(function (r) {
+    if (!String(r[0] || "").trim() || String(r[4]) !== String(spreadsheetId) || String(r[5]) !== String(nomeFoglio)) return;
+    const id = String(r[17] || "").trim();
+    const stessoNome = EM_normalizzaNome(r[8]) === EM_normalizzaNome(nomeCompleto);
+    if (id && accountId && id === accountId) {
+      if (!stessoNome) throw new Error("Nome diverso per lo stesso ID_ACCOUNT in Coda.");
+      candidati.push(String(r[0]));
+    } else if (!id && (Number(r[6]) === Number(numeroRiga) || stessoNome)) {
+      // Non trasferire una richiesta legacy ad un omonimo dopo un ordinamento.
+      if (Number(r[6]) !== Number(numeroRiga) || !stessoNome) {
+        throw new Error("Richiesta senza ID stabile potenzialmente spostata: verificare Coda e migrazione.");
+      }
+      candidati.push(String(r[0]));
+    }
+  });
+  if (candidati.length > 1) throw new Error("Piu richieste per lo stesso account: verificare Coda.");
+  // Vale anche per CREATA e ANNULLATA: il recupero esplicito riusa la richiesta.
+  return candidati.length ? candidati[0] : "";
+}
+
+function inizializzaIdentificativiMulino() {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(5000)) throw new Error("EmailMatcher occupato: riprova la migrazione.");
+  try {
+    const props = PropertiesService.getScriptProperties();
+    const targetId = props.getProperty("SPREADSHEET_ID");
+    const queueId = props.getProperty(EM_CREAZIONE_MAIL_PROPERTY);
+    if (!targetId || !queueId) throw new Error("Configurazione spreadsheet incompleta.");
+    const coda = SpreadsheetApp.openById(queueId).getSheetByName(EM_CODA_SHEET_NAME);
+    if (!coda) throw new Error("Scheda Coda non trovata.");
+    EM_preparaFoglioSistema(coda, EM_CODA_HEADERS);
+    const righeCoda = coda.getLastRow() > 1
+      ? coda.getRange(2, 1, coda.getLastRow() - 1, EM_CODA_HEADERS.length).getDisplayValues() : [];
+    const ss = SpreadsheetApp.openById(targetId);
+    const risultati = {identificativiCreati: 0, richiesteCollegate: 0, daVerificare: 0};
+    EM_TARGET_SHEETS.forEach(function (nomeFoglio) {
+      const foglio = ss.getSheetByName(nomeFoglio);
+      if (!foglio) { console.warn("Scheda assente, ignorata: " + nomeFoglio); return; }
+      const tabella = EM_trovaTabellaDestinazione(foglio);
+      const col = EM_colonnaIdAccount(foglio, tabella, true);
+      const numero = foglio.getLastRow() - tabella.headerRow;
+      if (numero <= 0) return;
+      const valori = foglio.getRange(tabella.headerRow + 1, 1, numero, foglio.getLastColumn()).getDisplayValues();
+      const giaPresenti = new Set();
+      valori.forEach(function (r) {
+        const id = String(r[col - 1] || "").trim();
+        if (id && giaPresenti.has(id)) throw new Error("ID_MULINO duplicato in " + nomeFoglio + ": correggerlo prima di proseguire.");
+        if (id) giaPresenti.add(id);
+      });
+      const conteggiNomi = {};
+      valori.forEach(function (r) {
+        const nome = EM_normalizzaNome(r[tabella.nameCol - 1]);
+        if (!nome) return;
+        conteggiNomi[nome] = (conteggiNomi[nome] || 0) + 1;
+        if (!String(r[col - 1] || "").trim()) {
+          r[col - 1] = Utilities.getUuid();
+          risultati.identificativiCreati++;
+        }
+      });
+      foglio.getRange(tabella.headerRow + 1, col, numero, 1).setNumberFormat("@").setValues(
+        valori.map(function (r) { return [r[col - 1] || ""]; })
+      );
+      SpreadsheetApp.flush();
+      righeCoda.forEach(function (r, index) {
+        if (!String(r[0] || "").trim() || String(r[4]) !== String(targetId) || String(r[5]) !== nomeFoglio || String(r[17] || "").trim()) return;
+        const riga = Number(r[6]);
+        const dati = valori[riga - tabella.headerRow - 1];
+        const nome = EM_normalizzaNome(r[8]);
+        const stessaRiga = righeCoda.filter(function (q) {
+          return String(q[0] || "").trim() && String(q[4]) === String(targetId) && String(q[5]) === nomeFoglio && Number(q[6]) === riga;
+        });
+        if (!dati || !nome || conteggiNomi[nome] !== 1 || stessaRiga.length !== 1 ||
+            EM_normalizzaNome(dati[tabella.nameCol - 1]) !== nome || Number(r[7]) !== tabella.emailCol) {
+          risultati.daVerificare++;
+          console.warn("Coda riga " + (index + 2) + ": collegamento non univoco, lasciata invariata.");
+          return;
+        }
+        const id = String(dati[col - 1]).trim();
+        // Ultima rilettura prima di collegare una vecchia richiesta.
+        const attuale = foglio.getRange(riga, 1, 1, foglio.getLastColumn()).getDisplayValues()[0];
+        if (String(attuale[col - 1]).trim() !== id || EM_normalizzaNome(attuale[tabella.nameCol - 1]) !== nome) {
+          throw new Error("Righe spostate durante la migrazione: interrompere le modifiche al foglio e riprovare.");
+        }
+        coda.getRange(index + 2, 18).setNumberFormat("@").setValue(id);
+        r[17] = id;
+        risultati.richiesteCollegate++;
+      });
+    });
+    SpreadsheetApp.flush();
+    console.log("Identificativi stabili: " + JSON.stringify(risultati));
+    console.log("Eseguire /controlla dal Mugnaio prima di /riprendi. Non ordinare o modificare le nuove colonne ID manualmente.");
+    return risultati;
+  } finally { lock.releaseLock(); }
+}
+
+
+// Compatibilità temporanea: sorgenti prima e dopo rinomina/trasferimento.
+// Read-only resolution during the coordinated sheet rename/move.
+function EM_risolviSorgenteArchiviata_(ss, gruppo, nomeFoglio, props, cache) {
+  var primary = ss.getSheetByName(nomeFoglio);
+  if (primary) return {foglio: primary, label: gruppo.label, legacy: false};
+  if (gruppo.property !== 'SPREADSHEET_ID_ARCHIVIO_MATCHED')
+    return {foglio: null, label: gruppo.label, legacy: false};
+  if (nomeFoglio === 'LottoGold Old')
+    return {foglio: ss.getSheetByName('LottoGold'), label: gruppo.label, legacy: true};
+  if (nomeFoglio !== 'GoldBet Old')
+    return {foglio: null, label: gruppo.label, legacy: false};
+  var id = props.getProperty('SPREADSHEET_ID');
+  if (!id) throw new Error('SPREADSHEET_ID mancante durante la transizione GoldBet.');
+  var source = cache[id];
+  if (!source) {
+    source = SpreadsheetApp.openById(id);
+    cache[id] = source;
+  }
+  return {foglio: source.getSheetByName('GoldBet Old') || source.getSheetByName('GoldBet'),
+    label: 'Matched & Arbitrage', legacy: true};
+}
+
+
+// ============================================================
 // IDENTITA DELLA REGISTRAZIONE E REVISIONE OMONIMI (v1.3.21)
 // Nessuna nuova colonna nei fogli account. Metadati di riga e un
 // foglio separato nel file di log conservano identita e decisioni.
@@ -2441,6 +2569,18 @@ function EM_verificaIntestazioniSistema(
 
 function EM_normalizzaSito_(value) {
   return EM_normalizzaTesto(value).replace(/ /g, "");
+}
+
+function EM_famigliaSito_(value) {
+  // Solo blocco prudenziale: una rinomina d'archivio non autorizza
+  // mai la deduzione temporale fra fogli differenti.
+  const site = EM_normalizzaSito_(value);
+  const archives = {
+    pokerstarsold: "pokerstars", sisalold: "sisalsport", sisalold2: "sisalsport",
+    sisal1kold: "sisalsport", mylotteriesplayold: "mylotteriesplay",
+    goldbetold: "goldbet"
+  };
+  return Object.prototype.hasOwnProperty.call(archives, site) ? archives[site] : site;
 }
 
 function EM_normalizzaUsername_(value) {
@@ -2521,13 +2661,19 @@ function EM_leggiRegistrazione_(sheet, table, row, values, persist, metadata) {
     if (!saved) throw new Error("Identita registrazione non salvata.");
   }
   const data = saved ? saved.data : {};
+  const existingAccountId = table.idCol ? String(values[table.idCol - 1] || "").trim() : "";
+  const activeTarget = EM_TARGET_SHEETS.indexOf(sheet.getName()) !== -1;
+  // Riusa l'identita gia adottata dal Mugnaio e dalla Coda.
+  // Solo il percorso reale di una destinazione attiva puo inizializzarla.
+  const accountId = persist && activeTarget ?
+    EM_identitaAccount(sheet, row, nome, true) : existingAccountId;
   const sito = EM_normalizzaSito_(sheet.getName());
   const defaultValid = EM_FOGLI_SOLO_REGISTRAZIONI_VALIDE.some(function(n) {
     return EM_normalizzaSito_(n) === sito;
   });
   const modificata = !!data.firma && data.firma !== firma;
   return {
-    id: [sheet.getParent().getId(), sheet.getSheetId(), data.id || (row + ":" + table.nameCol)].join(":"),
+    id: [sheet.getParent().getId(), sheet.getSheetId(), table.nameCol, accountId || data.id || row].join(":"),
     spreadsheet: sheet.getParent().getId(), sheetId: sheet.getSheetId(),
     sito: sito, foglio: sheet.getName(), riga: row, nameCol: table.nameCol, nome: nome,
     username: username, giorno: giorno, firma: firma,
@@ -2573,7 +2719,7 @@ function EM_cercaNomeInIndice_(indice, nome, dest) {
   }
   const record = indice[EM_normalizzaNome(nome)];
   const regs = record ? record.registrazioni.filter(function(r) {
-    return !EM_stessaRiga_(r, dest) && r.sito === dest.sito;
+    return !EM_stessaRiga_(r, dest) && EM_famigliaSito_(r.sito) === EM_famigliaSito_(dest.sito);
   }) : [];
   const ambiguous = function(reason) {
     return {stato: "AMBIGUA", email: "", contesto: contesto,
@@ -2586,6 +2732,7 @@ function EM_cercaNomeInIndice_(indice, nome, dest) {
       return EM_normalizzaSito_(n) === dest.sito;
     });
     for (const prior of regs) {
+      if (prior.sito !== dest.sito) return ambiguous("Omonimo in un archivio dello stesso sito: revisione manuale");
       if (!dest.username || !prior.username) return ambiguous("Username mancante o non affidabile");
       if (!dest.valida || !prior.valida) return ambiguous("Registrazione non confermata valida/completata");
       if (dest.giorno === null || prior.giorno === null) return ambiguous("Data apertura mancante o non interpretabile");

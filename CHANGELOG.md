@@ -8,7 +8,9 @@
   invalidata quando cambiano i dati o i candidati osservati.
 - Nessuna colonna aggiunta ai fogli account, Coda o Whitelist. Nessuna modifica al worker,
   a data/ o secrets/. Aggiornamento Apps Script separato dal deploy Docker.
-- Test sullo script reale integrati nella suite offline di deploy.
+- 72 casi di regressione sullo script integrato con il progetto Google corrente,
+  comprese intestazioni reali, ID_MULINO/ID_ACCOUNT e archivi rinominati.
+- Conservate le protezioni già pubblicate nella versione 38 del progetto Apps Script.
 
 # v1.3.18 - GoldBet archive
 

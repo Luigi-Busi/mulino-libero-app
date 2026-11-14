@@ -82,9 +82,9 @@ class Book {
   }
   getSpreadsheetTimeZone() { return "Europe/Rome"; }
 }
-const headers = ["Data apertura", "Nome e Cognome", "Username", "E-mail", "Password", "Provenienza"];
+const headers = ["Data apertura", "Nome e Cognome", "Username", "E-mail", "Password", "Provenienza", "ID_MULINO"];
 const account = (user, date = "01/11/2026", email = "", name = "Mario Rossi") =>
-  [date, name, user, email, "unused-password", "fixture"];
+  [date, name, user, email, "unused-password", "fixture", "account-" + crypto.createHash("sha256").update(JSON.stringify([user,date,name])).digest("hex").slice(0,16)];
 function fixture(prior = account("old", "01/11/2026", "old@example.test"),
                  target = account("new", "21/11/2026")) {
   let serial = 0, releases = 0, notifications = [], failNotify = false;
@@ -220,7 +220,7 @@ test("known distinct person cannot leak through cross-site alias email", () => {
 test("same site in an archive also participates", () => {
   const f = fixture(null);
   const main = f.books.get("main").getSheetByName("PokerStars");
-  const archive = f.books.get("archive").getSheetByName("PokerStars");
+  const archive = f.books.get("archive").getSheetByName("PokerStars Old");
   main.cells.push(account("new", "22/11/2026"));
   archive.cells.push(account("old", "01/11/2026", "archive@example.test"));
   assert.equal(f.context.completaEmailRiga("PokerStars", 2).stato, "AMBIGUA");
@@ -395,7 +395,7 @@ test("invalid manual inputs are rejected without queue writes", () => {
 
 test("20-day inference is disabled on other configured sites", () => {
   const f = fixture(null);
-  for (const name of ["GoldBet", "MyLotteriesPlay"]) {
+  for (const name of ["MyLotteriesPlay"]) {
     const sheet = f.books.get("main").getSheetByName(name);
     sheet.cells.push(account("old", "01/11/2026", "old@example.test"), account("new", "21/11/2026"));
     f.context.impostaValiditaRegistrazione_("SPREADSHEET_ID", name, 2, true);
@@ -434,7 +434,7 @@ test("absence of registration context fails closed", () => {
 });
 
 
-for (const name of ["PokerStars", "Snai Sport"]) {
+for (const name of ["PokerStars"]) {
   test("20-day rule is active on " + name, () => {
     const f = fixture(null);
     const sheet = f.books.get("main").getSheetByName(name);
@@ -444,5 +444,73 @@ for (const name of ["PokerStars", "Snai Sport"]) {
     assert.equal(f.queue().length, 2);
   });
 }
+
+
+test("actual Sisal and PokerStars headers identify date, username and existing ID", () => {
+  const c=fixture().context;
+  const sisal=["Data Apertura","Chiusura","Diffida","Nome Cognome","Username","Password","E-mail",
+    "Password E-mail","Provenienza","Lordo Sport","Pulizia","Netto Sport","Prima Tappa","Seconda Tappa",
+    "Terza Tappa","Quarta Tappa","Totale","ID_MULINO"];
+  const poker=["Data Apertura","Chiusura","Diffida","Nome Cognome","Username","Password","E-mail",
+    "Pass E-mail","Provenienza","Slot","Sport","Poker","Perdita Roulette","Lordo","","ID_MULINO"];
+  for (const [row,head,idCol] of [[8,sisal,18],[9,poker,16]]) {
+    const values=Array.from({length:row-1},()=>[]).concat([head]);
+    const tables=c.EM_trovaTabelleSorgente(values);
+    assert.equal(tables.length,1);
+    assert.equal(tables[0].headerRow,row);
+    assert.equal(tables[0].nameCol,4);assert.equal(tables[0].usernameCol,5);
+    assert.equal(tables[0].emailCol,7);assert.equal(tables[0].dateCol,1);
+    assert.equal(tables[0].idCol,idCol);
+  }
+});
+test("new request preserves the existing eighteen-column queue schema", () => {
+  const f=fixture();f.run();
+  assert.equal(f.queue()[0].length,18);assert.equal(f.queue()[0][17],"ID_ACCOUNT");
+  assert.equal(f.queue()[1].length,18);
+  assert.equal(f.queue()[1][17],f.sheet.cells.at(-1)[6]);
+});
+test("completed requests remain idempotent through the stable account identifier", () => {
+  const f=fixture(), first=f.run();
+  f.queue()[1][3]="CREATA";
+  const second=f.run();
+  assert.equal(second.richiestaId,first.richiestaId);assert.equal(f.queue().length,2);
+});
+test("moving a queued account reuses the same request by ID_ACCOUNT", () => {
+  const f=fixture(), first=f.run();
+  f.sheet.cells.splice(2,0,account("unrelated","","","Other Person"));
+  f.sheet.meta.filter(m=>m.row>=3).forEach(m=>m.row++);
+  assert.equal(f.run().richiestaId,first.richiestaId);assert.equal(f.queue().length,2);
+});
+test("duplicate existing ID_MULINO fails closed", () => {
+  const f=fixture();f.sheet.cells[2][6]=f.sheet.cells[1][6];
+  assert.throws(()=>f.run(),/duplicato/);assert.equal(f.queue().length,1);
+});
+test("existing ID_MULINO is reused without adding an account column", () => {
+  const f=fixture(), before=f.sheet.getLastColumn(), id=f.sheet.cells[2][6];
+  const reg=f.reg(3,true);
+  assert.equal(f.sheet.getLastColumn(),before);assert(reg.id.includes(id));
+});
+test("a renamed archive can block but never trigger a cross-sheet 20-day inference", () => {
+  const f=fixture(null);
+  f.books.get("archive").getSheetByName("Sisal Old").cells.push(account("archived","01/11/2026","archived@example.test"));
+  ambiguous(f);
+});
+test("archived source resolver keeps its existing read-only transition fallback", () => {
+  const f=fixture(null), archive=f.books.get("archive"), main=f.books.get("main");
+  archive.sheets.delete("GoldBet Old");
+  const source=main.insertSheet("GoldBet",[headers.slice()]);
+  const result=f.context.EM_risolviSorgenteArchiviata_(archive,
+    {property:"SPREADSHEET_ID_ARCHIVIO_MATCHED",label:"Archivio Matched"},"GoldBet Old",
+    {getProperty:k=>f.props.get(k)},{});
+  assert.equal(result.foglio,source);assert.equal(result.legacy,true);
+});
+test("Snai rule can classify records without activating the archived sheet", () => {
+  const f=fixture(null), sheet=f.books.get("archive").getSheetByName("Snai Sport");
+  sheet.cells.push(account("old","01/11/2026","old@example.test"),account("new","21/11/2026"));
+  const table=f.context.EM_trovaTabellaDestinazione(sheet);
+  const reg=f.context.EM_leggiRegistrazione_(sheet,table,3,sheet.cells[2],false);
+  assert.equal(f.context.EM_cercaNomeInIndice_(f.index(),reg.nome,reg).stato,"NON TROVATA");
+  assert.equal(f.queue().length,1);
+});
 
 process.stdout.write(count + " EmailMatcher regression cases passed.\n");
