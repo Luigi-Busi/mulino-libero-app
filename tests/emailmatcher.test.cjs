@@ -81,13 +81,14 @@ class Book {
     return sheet;
   }
   getSpreadsheetTimeZone() { return "Europe/Rome"; }
+  getSheets() { return [...this.sheets.values()]; }
 }
 const headers = ["Data apertura", "Nome e Cognome", "Username", "E-mail", "Password", "Provenienza", "ID_MULINO"];
 const account = (user, date = "01/11/2026", email = "", name = "Mario Rossi") =>
   [date, name, user, email, "unused-password", "fixture", "account-" + crypto.createHash("sha256").update(JSON.stringify([user,date,name])).digest("hex").slice(0,16)];
 function fixture(prior = account("old", "01/11/2026", "old@example.test"),
                  target = account("new", "21/11/2026")) {
-  let serial = 0, releases = 0, notifications = [], failNotify = false;
+  let serial = 0, releases = 0, notifications = [], telegramCalls = [], failNotify = false;
   const books = new Map(), props = new Map([
     ["SPREADSHEET_ID", "main"], ["SPREADSHEET_ID_ARCHIVIO_MATCHED", "archive"],
     ["SPREADSHEET_ID_SLOTTING", "slot"], ["SPREADSHEET_ID_LOG_MAIL", "log"],
@@ -96,12 +97,24 @@ function fixture(prior = account("old", "01/11/2026", "old@example.test"),
   const context = vm.createContext({
     console: {log() {}, warn() {}, error() {}},
     LockService: {getScriptLock: () => ({tryLock: () => true, releaseLock: () => releases++})},
-    PropertiesService: {getScriptProperties: () => ({getProperty: key => props.get(key) || null})},
+    PropertiesService: {getScriptProperties: () => ({getProperty: key => props.get(key) || null,
+      setProperty: (key,value) => props.set(key,value), deleteProperty: key=>props.delete(key),
+      getProperties: ()=>Object.fromEntries(props)})},
     SpreadsheetApp: {openById: id => {
       assert(books.has(id), "unexpected workbook " + id);
       return books.get(id);
     }, flush() {}},
     ADMIN_TELEGRAM_ID: "fixture-owner",
+    bancoDashboardContext_: false,
+    bancoApi_(method,payload) {
+      telegramCalls.push({method,payload});
+      if (failNotify && method === "sendMessage") throw Error("mock transport failure");
+      if (method === "sendMessage") {
+        assert.equal(payload.chat_id,"fixture-owner");
+        notifications.push(payload.text);return {message_id:notifications.length,chat:{id:"fixture-owner"}};
+      }
+      return true;
+    },
     inviaTelegram(id, text) {
       assert.equal(id, "fixture-owner");
       if (failNotify) throw Error("mock transport failure");
@@ -130,7 +143,7 @@ function fixture(prior = account("old", "01/11/2026", "old@example.test"),
     JSON.parse(vm.runInContext("JSON.stringify(EM_CODA_HEADERS)", context))
   ]);
   return {
-    context, books, props, sheet, notifications,
+    context, books, props, sheet, notifications, telegramCalls,
     get releases() { return releases; },
     failNotifications(value) { failNotify = value; },
     run() { return context.completaEmailRiga("Sisal Sport", sheet.cells.length); },
@@ -513,4 +526,5 @@ test("Snai rule can classify records without activating the archived sheet", () 
   assert.equal(f.queue().length,1);
 });
 
-process.stdout.write(count + " EmailMatcher regression cases passed.\n");
+if (require.main === module) process.stdout.write(count + " EmailMatcher regression cases passed.\n");
+module.exports = {fixture, account, headers, test, ambiguous, Sheet, Metadata, script};

@@ -1,3 +1,15 @@
+## v1.3.22 — 14 novembre 2026 — scelta degli omonimi in Telegram
+
+Pubblicato come versione 40 di Apps Script, con lettura di verifica dei sorgenti e del deployment.
+
+- Avvisi del Banco con mail trovate, paginazione e pulsante per una nuova mail.
+- Scelta e conferma in chat: decisione persistente, assegnazione o richiesta al Mugnaio.
+- Controlli su proprietario, messaggio, identità stabile, contesto e vecchi pulsanti.
+- Retry dopo errori senza doppie assegnazioni o richieste; creazioni già aperte protette.
+- Un solo aggancio nel gestore webhook esistente, dopo autenticazione e deduplicazione.
+- 72 casi EmailMatcher e 49 casi Telegram superati; 7 controlli sul doPost reale simulato.
+- Nessuna modifica al worker, a data/ o secrets/. Dettagli in ops/telegram-omonimi.md.
+
 ## v1.3.21 — 14 novembre 2026 — omonimi in EmailMatcher
 
 Pubblicato nel progetto Apps Script come versione 39; indirizzo e accessi conservati.

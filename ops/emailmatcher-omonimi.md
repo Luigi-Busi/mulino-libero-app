@@ -105,6 +105,9 @@ procedure di copia/ripristino. Il backup del solo worker Docker non li contiene.
 
 ## Revisione manuale e notifiche
 
+Dalla v1.3.22 la scelta ordinaria si esegue dai [pulsanti Telegram](telegram-omonimi.md).
+Le funzioni nell’editor descritte sotto restano un’alternativa amministrativa.
+
 Il nuovo foglio RevisioniOmonimi viene creato nel file SPREADSHEET_ID_LOG_MAIL
 solo al primo caso ambiguo. È un registro di sistema separato dai fogli account:
 ID_REGISTRAZIONE, AGGIORNATA_IL, STATO, FOGLIO, RIGA, NOME, MOTIVO, CONTESTO.

@@ -1,0 +1,4 @@
+{
+  "marker": "    // Private dashboard and callbacks; existing commands retain their handlers.",
+  "insert": "    // EmailMatcher: callbacks owner-only, after webhook authentication and deduplication.\n    if (typeof EM_gestisciCallbackOmonimo_ === \"function\" && EM_gestisciCallbackOmonimo_(update)) {\n      return rispostaOK();\n    }\n\n"
+}
