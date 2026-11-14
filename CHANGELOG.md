@@ -1,3 +1,15 @@
+## v1.3.23 — candidata — Tester per numero di telefono
+
+PREPARATA, NON INSTALLATA: installazione rinviata su richiesta del proprietario.
+
+- Numero della Whitelist come etichetta principale nell'elenco Tester,
+  nel dettaglio e nella conferma di azzeramento, riservati al privato del proprietario.
+- ID come ripiego se manca il numero e come distinzione per numeri duplicati;
+  identità, conteggi, azzeramenti e comandi manuali restano associati all'ID Telegram.
+- Nessuna modifica a dati, Whitelist, coda, assegnazioni o procedura SMS.
+- 25 test mirati superati; dettagli in ops/tester-phone-labels.md.
+- Nessun tag, merge su main o deploy finché non arriva il via libera all'installazione.
+
 ## v1.3.22 — 14 novembre 2026 — scelta degli omonimi in Telegram
 
 Pubblicato come versione 40 di Apps Script, con lettura di verifica dei sorgenti e del deployment.

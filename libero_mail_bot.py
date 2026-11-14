@@ -4117,20 +4117,39 @@ async def panel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await render_admin_panel(coordinator, query.message, text=text or None, edit=True)
 
 
-async def tester_ids(coordinator):
+async def tester_directory(coordinator):
     known = coordinator.outcomes.testers.known_ids()
     try:
         whitelist = await asyncio.to_thread(coordinator.store.whitelist_map)
         ids = {i for i in whitelist if TesterLedger.valid_id(i)}
-        return sorted(known | ids), True
+        phones = {
+            i: phone.strip() for i, phone in whitelist.items()
+            if i in ids and isinstance(phone, str)
+            and re.fullmatch(r'\+[1-9][0-9]{6,14}', phone.strip())
+        }
+        return sorted(known | ids), phones, True
     except Exception:
-        # Never expose the sheet, phone numbers or provider error text.
-        return sorted(known), False
+        # Never expose the sheet or provider error text.
+        return sorted(known), {}, False
 
 
-def tester_detail_text(stats):
+async def tester_ids(coordinator):
+    ids, _, complete = await tester_directory(coordinator)
+    return ids, complete
+
+
+def tester_label(tester, phones):
+    phone = phones.get(tester)
+    if not phone:
+        return f'ID {tester} · numero non disponibile'
+    if sum(value == phone for value in phones.values()) > 1:
+        return f'{phone} · ID {tester}'
+    return phone
+
+
+def tester_detail_text(stats, label):
     started = datetime.fromisoformat(stats['started']).astimezone(ZoneInfo('Europe/Rome'))
-    return (f"👤 Tester — ID {stats['tester_id']}\n\n"
+    return (f"👤 Tester — {label}\n\n"
             f"Operazioni completate: {stats['count']}\n"
             f"Conteggio iniziato: {started.strftime('%d/%m/%Y %H:%M:%S')} (Italia)\n"
             f"Totale nello storico: {stats['total']}\n\n"
@@ -4139,7 +4158,7 @@ def tester_detail_text(stats):
 
 
 async def show_tester_list(coordinator, message, page=0):
-    ids, complete = await tester_ids(coordinator)
+    ids, phones, complete = await tester_directory(coordinator)
     pages = max(1, (len(ids) + 9) // 10)
     page = max(0, min(int(page), pages - 1))
     selected = ids[page*10:(page+1)*10]
@@ -4148,7 +4167,7 @@ async def show_tester_list(coordinator, message, page=0):
         count = coordinator.outcomes.testers.stats(tester)['count']
         action = f'tester_select_{index}'
         payload[action] = tester
-        rows.append([(f'ID {tester} · {count}', action)])
+        rows.append([(f'{tester_label(tester, phones)} · {count}', action)])
     if not ids:
         lines.append('Nessun tester disponibile.')
     if not complete:
@@ -4161,17 +4180,20 @@ async def show_tester_list(coordinator, message, page=0):
             payload[action] = destination
     if navigation:
         rows.append(navigation)
-    lines.append('Seleziona un ID per dettagli e azzeramento. /conteggio ID e /azzera ID sono disponibili solo qui in privato.')
+    lines.append('Seleziona un tester per dettagli e azzeramento. /conteggio ID e /azzera ID sono disponibili solo qui in privato.')
     await render_admin_panel(coordinator, message, text='\n'.join(lines), view='testers',
                              extra_rows=rows, session_payload=payload)
 
 
-async def show_tester_detail(coordinator, message, tester, *, confirm=False, notice=''):
+async def show_tester_detail(coordinator, message, tester, *, confirm=False, notice='', phones=None):
+    if phones is None:
+        _, phones, _ = await tester_directory(coordinator)
+    label = tester_label(tester, phones)
     stats = coordinator.outcomes.testers.stats(tester)
     payload = dict(tester=tester, snapshot=stats['snapshot'])
-    text = tester_detail_text(stats)
+    text = tester_detail_text(stats, label)
     if confirm:
-        text = (f"Azzerare il conteggio del tester ID {tester}?\n"
+        text = (f"Azzerare il conteggio del tester {label}?\n"
                 f"Operazioni da azzerare: {stats['count']}.\n"
                 "Ripartirà da zero; lo storico e gli altri tester saranno conservati.\n\n" + text)
         rows = [[('✅ Conferma azzeramento', 'tester_reset_yes'), ('↩️ Annulla', 'tester_detail')]]
@@ -4228,13 +4250,13 @@ async def tester_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         tester = int(args[0])
         if not TesterLedger.valid_id(tester):
             raise ValueError('ID out of range')
-        ids, complete = await tester_ids(coordinator)
+        ids, phones, complete = await tester_directory(coordinator)
         if tester not in ids:
             await render_admin_panel(coordinator, update.effective_message,
                 text=('Tester non presente nella whitelist o nello storico.' if complete else
                       'Whitelist non raggiungibile e tester assente dallo storico: non posso verificarlo.'))
             return
-        await show_tester_detail(coordinator, update.effective_message, tester, confirm=name == '/azzera')
+        await show_tester_detail(coordinator, update.effective_message, tester, confirm=name == '/azzera', phones=phones)
     except (sqlite3.Error, ValueError, TypeError):
         await render_admin_panel(coordinator, update.effective_message,
             text='⚠️ ID o registro non disponibile. Nessun azzeramento confermato. Premi Tester per aggiornare.')

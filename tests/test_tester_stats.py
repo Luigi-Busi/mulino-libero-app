@@ -190,7 +190,8 @@ class TesterPanelTests(unittest.IsolatedAsyncioTestCase):
         o = worker.CreatedOutcomes()
         self.addCleanup(o.close)
         c.outcomes = o
-        c.store.whitelist_map.return_value = {11: 'PRIVATE-PHONE', 22: 'OTHER-PHONE'}
+        # Synthetic phone numbers; never use the live whitelist in these tests.
+        c.store.whitelist_map.return_value = {11: '+390000000011', 22: '+390000000022'}
         o.save(request(), 'fixture', 'fixture@libero.it', sms_proof=(11, o.testers.now()))
         return c, u, ctx, m
 
@@ -202,7 +203,10 @@ class TesterPanelTests(unittest.IsolatedAsyncioTestCase):
     async def test_list_detail_reset_confirmation_and_replay_reuse_one_message(self):
         c,u,ctx,m = await self.fixture()
         await self.click(u,m,ctx,'testers')
-        self.assertNotIn('PRIVATE-PHONE', c.bot.edit_message_text.call_args.kwargs['text'])
+        labels = [button.text for row in c.bot.edit_message_text.call_args.kwargs['reply_markup'].inline_keyboard
+                  for button in row]
+        self.assertIn('+390000000011 · 1', labels)
+        self.assertFalse(any(label.startswith('ID 11') for label in labels))
         await self.click(u,m,ctx,'tester_select_0')
         self.assertIn('Operazioni completate: 1', c.bot.edit_message_text.call_args.kwargs['text'])
         await self.click(u,m,ctx,'tester_reset')
@@ -285,3 +289,64 @@ class TesterPanelTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('non disponibile',text)
         self.assertNotIn('TEST-SECRET',text)
         self.assertEqual(c.outcomes.testers.stats(11)['count'],1)
+
+    async def test_phone_is_primary_label_in_detail_and_reset_confirmation(self):
+        c,u,ctx,m = await self.fixture()
+        await self.click(u,m,ctx,'testers')
+        await self.click(u,m,ctx,'tester_select_0')
+        text = c.bot.edit_message_text.call_args.kwargs['text']
+        self.assertIn('👤 Tester — +390000000011', text)
+        self.assertNotIn('ID 11', text)
+        await self.click(u,m,ctx,'tester_reset')
+        text = c.bot.edit_message_text.call_args.kwargs['text']
+        self.assertIn('Azzerare il conteggio del tester +390000000011?', text)
+        self.assertEqual(c.outcomes.testers.stats(11)['count'], 1)
+
+    async def test_history_without_phone_remains_accessible(self):
+        c,u,ctx,m = await self.fixture()
+        c.store.whitelist_map.return_value = {22: '+390000000022'}
+        await self.click(u,m,ctx,'testers')
+        labels = [button.text for row in c.bot.edit_message_text.call_args.kwargs['reply_markup'].inline_keyboard
+                  for button in row]
+        self.assertIn('ID 11 · numero non disponibile · 1', labels)
+        await self.click(u,m,ctx,'tester_select_0')
+        self.assertIn('ID 11 · numero non disponibile', c.bot.edit_message_text.call_args.kwargs['text'])
+        self.assertEqual(c.outcomes.testers.stats(11)['count'], 1)
+
+    async def test_duplicate_phone_numbers_keep_distinct_tester_actions(self):
+        c,u,ctx,m = await self.fixture()
+        phone = '+390000000011'
+        c.store.whitelist_map.return_value = {11: phone, 22: phone}
+        c.outcomes.save(request('second', '22'), 'fixture', 'fixture@libero.it',
+                        sms_proof=(22, c.outcomes.testers.now()))
+        await self.click(u,m,ctx,'testers')
+        labels = [button.text for row in c.bot.edit_message_text.call_args.kwargs['reply_markup'].inline_keyboard
+                  for button in row]
+        self.assertIn(phone + ' · ID 11 · 1', labels)
+        self.assertIn(phone + ' · ID 22 · 1', labels)
+        await self.click(u,m,ctx,'tester_select_1')
+        await self.click(u,m,ctx,'tester_reset')
+        self.assertIn(phone + ' · ID 22', c.bot.edit_message_text.call_args.kwargs['text'])
+        await self.click(u,m,ctx,'tester_reset_yes')
+        self.assertEqual(c.outcomes.testers.stats(22)['count'], 0)
+        self.assertEqual(c.outcomes.testers.stats(11)['count'], 1)
+
+    async def test_refresh_reads_the_current_phone_without_changing_identity(self):
+        c,u,ctx,m = await self.fixture()
+        await self.click(u,m,ctx,'testers')
+        await self.click(u,m,ctx,'tester_select_0')
+        c.store.whitelist_map.return_value = {11: '+390000000033'}
+        await self.click(u,m,ctx,'tester_detail')
+        text = c.bot.edit_message_text.call_args.kwargs['text']
+        self.assertIn('+390000000033', text)
+        self.assertNotIn('+390000000011', text)
+        self.assertEqual(c.outcomes.testers.stats(11)['count'], 1)
+
+    async def test_invalid_phone_is_not_displayed_as_a_tester_label(self):
+        c,u,ctx,m = await self.fixture()
+        c.store.whitelist_map.return_value = {11: 'PRIVATE-PROVIDER-TEXT'}
+        await self.click(u,m,ctx,'testers')
+        labels = [button.text for row in c.bot.edit_message_text.call_args.kwargs['reply_markup'].inline_keyboard
+                  for button in row]
+        self.assertIn('ID 11 · numero non disponibile · 1', labels)
+        self.assertFalse(any('PRIVATE-PROVIDER-TEXT' in label for label in labels))
