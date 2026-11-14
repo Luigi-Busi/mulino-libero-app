@@ -1,4 +1,4 @@
-## v1.3.25 — candidata — Ripartenza dopo scadenza esplicita
+## v1.3.25 — 14 novembre 2026 — Ripartenza dopo scadenza esplicita
 
 - Riconosce «Tempo di registrazione scaduto. Inizia una nuova registrazione.»
   sul modulo iniziale Libero, anche durante l'attesa del CAPTCHA o del tester.
@@ -7,7 +7,9 @@
 - Massimo due ripartenze automatiche; reset generici, esiti già registrati e
   verifica SMS già completata restano soggetti a revisione. Rispetta pausa e annullamento.
 - Nessuna nuova riga, colonna o migrazione. Dettagli in ops/registration-expired.md.
-- Preparata, non installata.
+- Installata dopo autorizzazione del proprietario; 319 test e controlli del rilascio superati.
+- Prima della sostituzione verificate pausa e assenza di registrazioni attive; pausa conservata.
+- v1.3.24 disponibile per ripristino.
 
 ## v1.3.24 — 14 novembre 2026 — Cambio tester dalla finestra SMS
 

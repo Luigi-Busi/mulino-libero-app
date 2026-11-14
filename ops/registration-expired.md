@@ -1,7 +1,8 @@
 # Scadenza esplicita della registrazione — v1.3.25
 
-Preparata, non installata. Il proprietario ha precisato che la ripartenza
-deve riguardare la stessa persona, non la successiva richiesta in coda.
+Installata il 14 novembre 2026 dopo autorizzazione del proprietario.
+Verificate pausa, assenza di registrazioni attive e assenza di attese umane.
+La pausa è stata mantenuta. La ripartenza riguarda la stessa persona.
 
 ## Comportamento
 
@@ -42,6 +43,10 @@ Falso negativo: testi o struttura diversi mantengono la gestione d'errore
 esistente. Il primo episodio reale resta da osservare dopo l'installazione.
 
 ## Rilascio
+
+Installazione confermata: v1.3.25, commit d881521692fd7518b545e0ca191cb761c8e52776.
+319 test e controlli preliminari superati. Controller senza transazioni pendenti,
+Git/immagine/mount/configurazione coerenti. v1.3.24 conservata per ripristino.
 
 Seguire ops/deploy/README.md; installare soltanto con pausa persistente e senza
 registrazioni attive. Compatibile con v1.3.24: nessuna modifica a data/, secrets/,
