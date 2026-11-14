@@ -1,5 +1,8 @@
 # Creazione assistita Libero Mail
 
+La v1.3.21 protegge gli omonimi nello stesso sito e conserva le scelte manuali.
+Le istruzioni di attivazione sono in [EmailMatcher e omonimi](ops/emailmatcher-omonimi.md).
+
 Sistema separato da **Il Banco** che parte quando EmailMatcher non trova alcuna
 e-mail per il Nome e Cognome appena inserito.
 
@@ -187,8 +190,9 @@ richiesta di intervento manuale.
 
 ## 1. Aggiornare Apps Script
 
-Se hai già inizializzato `Coda` e `Whitelist` con questo EmailMatcher, questa
-parte è già completata. Il file Apps Script incluso non è stato modificato.
+La v1.3.21 modifica EmailMatcher: sostituire il file Apps Script anche se
+Coda e Whitelist sono già inizializzati. Non reinizializzare né cambiare le loro colonne.
+Vedi [regole, revisione manuale e attivazione](ops/emailmatcher-omonimi.md).
 
 1. Apri il progetto Apps Script nel quale sono presenti Il Banco ed
    EmailMatcher.

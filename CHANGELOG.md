@@ -1,3 +1,15 @@
+## v1.3.21 — 14 novembre 2026 — omonimi in EmailMatcher
+
+- Stesso nome normalizzato e stesso sito: nuova mail entro 20 giorni solo con
+  username diversi e affidabili, date interpretabili e registrazioni confermate valide.
+- Oltre 20 giorni, dati incompleti, duplicati e correzioni: blocco, revisione nel file
+  di log e avviso privato al proprietario tramite le funzioni esistenti di Il Banco.
+- Identità per riga/blocco nei metadati Google Sheets; decisione manuale persistente,
+  invalidata quando cambiano i dati o i candidati osservati.
+- Nessuna colonna aggiunta ai fogli account, Coda o Whitelist. Nessuna modifica al worker,
+  a data/ o secrets/. Aggiornamento Apps Script separato dal deploy Docker.
+- Test sullo script reale integrati nella suite offline di deploy.
+
 # v1.3.18 - GoldBet archive
 
 Exclude GoldBet from active consistency scans when its sheet is archived. Explicit request destinations remain checked. No queue/data schema changes.
