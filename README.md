@@ -1,6 +1,7 @@
 # Creazione assistita Libero Mail
 
-La v1.3.21 protegge gli omonimi nello stesso sito e conserva le scelte manuali.
+La v1.3.22 permette di scegliere e confermare le mail degli omonimi direttamente negli avvisi Telegram di Il Banco.
+La scelta resta salvata per l’account; [uso e controlli](ops/telegram-omonimi.md).
 Le istruzioni di attivazione sono in [EmailMatcher e omonimi](ops/emailmatcher-omonimi.md).
 
 Sistema separato da **Il Banco** che parte quando EmailMatcher non trova alcuna
@@ -189,6 +190,9 @@ richiesta di intervento manuale.
 - `.env.example`: configurazione senza segreti.
 
 ## 1. Aggiornare Apps Script
+
+Per la v1.3.22 è necessario anche il piccolo collegamento nel gestore dei clic di Codice.gs,
+come descritto in [Revisione degli omonimi da Telegram](ops/telegram-omonimi.md).
 
 La v1.3.21 modifica EmailMatcher: sostituire il file Apps Script anche se
 Coda e Whitelist sono già inizializzati. Non reinizializzare né cambiare le loro colonne.

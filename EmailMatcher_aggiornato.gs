@@ -452,7 +452,7 @@ function EM_completaEmailRigaInterna(
     );
     const indice = EM_costruisciIndiceEmail(props);
     const risultato = EM_cercaNomeInIndice_(indice, nome, destinazione);
-    if (!modalitaTest) EM_aggiornaRevisione_(props, destinazione, risultato);
+    if (!modalitaTest) EM_aggiornaRevisione_(props, destinazione, risultato, indice);
 
 
     if (
@@ -851,7 +851,7 @@ function EM_eseguiRicercaEmail(
           foglio, tabella, numeroRiga, valori[i], !soloAnteprima
         );
         const risultato = EM_cercaNomeInIndice_(indice, nome, destinazione);
-        if (!soloAnteprima) EM_aggiornaRevisione_(props, destinazione, risultato);
+        if (!soloAnteprima) EM_aggiornaRevisione_(props, destinazione, risultato, indice);
 
 
         if (
@@ -2675,7 +2675,7 @@ function EM_leggiRegistrazione_(sheet, table, row, values, persist, metadata) {
   return {
     id: [sheet.getParent().getId(), sheet.getSheetId(), table.nameCol, accountId || data.id || row].join(":"),
     spreadsheet: sheet.getParent().getId(), sheetId: sheet.getSheetId(),
-    sito: sito, foglio: sheet.getName(), riga: row, nameCol: table.nameCol, nome: nome,
+    sito: sito, foglio: sheet.getName(), riga: row, nameCol: table.nameCol, nome: nome, accountId: accountId,
     username: username, giorno: giorno, firma: firma,
     // Un'attestazione negativa ha precedenza sul contratto di inserimento.
     valida: !modificata && (data.validita ? data.validita.firma === firma &&
@@ -2764,7 +2764,7 @@ function EM_foglioRevisioni_(props, create) {
   return sheet;
 }
 
-function EM_aggiornaRevisione_(props, dest, result) {
+function EM_aggiornaRevisione_(props, dest, result, indice) {
   const ambiguous = result.stato === "AMBIGUA";
   if (dest.metadata && dest.metadata.data.decisione &&
       dest.metadata.data.decisione.contesto !== result.contesto) {
@@ -2781,33 +2781,23 @@ function EM_aggiornaRevisione_(props, dest, result) {
   const status = ambiguous ? "DA_REVISIONARE" : "RISOLTA";
   if (i >= 0 && rows[i][2] === status && rows[i][7] === result.contesto &&
       Number(rows[i][4]) === dest.riga && rows[i][3] === dest.foglio) {
-    if (ambiguous) EM_notificaRevisione_(dest, result);
+    if (ambiguous) EM_notificaRevisione_(dest, result, indice);
     return;
   }
   sheet.getRange(i < 0 ? sheet.getLastRow() + 1 : i + 2, 1, 1, EM_REVISIONI_HEADERS.length)
     .setValues([[dest.id, EM_dataOra(), status, dest.foglio, dest.riga,
       dest.nome, result.fonti, result.contesto]]);
-  if (ambiguous) EM_notificaRevisione_(dest, result);
+  if (ambiguous) EM_notificaRevisione_(dest, result, indice);
 }
 
-function EM_notificaRevisione_(dest, result) {
-  const saved = dest.metadata;
-  if (!saved || saved.data.avviso === result.contesto) return;
-  if (typeof inviaTelegram !== "function" || typeof ADMIN_TELEGRAM_ID === "undefined") {
-    console.warn("Revisione omonimo salvata; notifiche di Il Banco non disponibili.");
+function EM_notificaRevisione_(dest, result, indice) {
+  if (!dest.metadata || typeof bancoApi_ !== "function" ||
+      typeof ADMIN_TELEGRAM_ID === "undefined") {
+    console.warn("Revisione salvata; collegamento Telegram di Il Banco non disponibile.");
     return;
   }
-  try {
-    inviaTelegram(ADMIN_TELEGRAM_ID,
-      "⚠️ Omonimo da revisionare\n" + dest.foglio + " · riga " + dest.riga +
-      "\n" + dest.nome + "\n" + result.fonti.slice(0, 2500) +
-      "\nIn questa verifica nessuna mail assegnata o accodata. Vedi RevisioniOmonimi nel file di log.");
-    saved.data.avviso = result.contesto;
-    saved.item.setValue(JSON.stringify(saved.data));
-  } catch (error) {
-    // Il dubbio resta bloccato e visibile nel foglio. La scansione ritenta l'avviso.
-    console.warn("Avviso omonimo non inviato; revisione salvata nel file di log.");
-  }
+  try { EM_inviaRevisioneTelegram_(dest, result, indice); }
+  catch (_) { console.warn("Avviso omonimo non inviato; revisione salvata e ritentata alla prossima scansione."); }
 }
 
 // Da eseguire solo dopo verifica manuale, per qualsiasi sorgente configurata.
@@ -2837,21 +2827,7 @@ function decidiOmonimo_(nomeFoglio, numeroRiga, azione, email) {
   }
   return EM_conLock_(function() {
     const ctx = EM_contestoRigaManuale_("SPREADSHEET_ID", nomeFoglio, numeroRiga, true);
-    const reg = ctx.reg, data = reg.metadata.data;
-    if (data.firma !== reg.firma) delete data.validita;
-    data.firma = reg.firma;
-    reg.modificata = false;
-    reg.valida = data.validita ? data.validita.completata === true :
-      EM_FOGLI_SOLO_REGISTRAZIONI_VALIDE.some(function(n) { return EM_normalizzaSito_(n) === reg.sito; });
-    const indice = EM_costruisciIndiceEmail(ctx.props);
-    const contesto = EM_contestoOmonimo_(indice, reg.nome, reg);
-    delete data.daRivedere;
-    data.decisione = {contesto: contesto, azione: azione,
-      email: azione === "USA_EMAIL" ? EM_normalizzaEmail(email) : ""};
-    reg.metadata.item.setValue(JSON.stringify(data));
-    EM_aggiornaRevisione_(ctx.props, reg, {
-      stato: "DECISA", contesto: contesto, fonti: "Decisione manuale: " + azione
-    });
+    EM_salvaDecisioneOmonimo_(ctx, azione, email);
     SpreadsheetApp.flush();
     return {stato: "DECISIONE_SALVATA"};
   });
@@ -2875,11 +2851,362 @@ function EM_contestoRigaManuale_(property, name, row, targetOnly) {
   }
   const values = sheet.getRange(Number(row), 1, 1, sheet.getLastColumn()).getDisplayValues()[0];
   if (!String(values[table.nameCol - 1] || "").trim()) throw new Error("Nome mancante.");
-  return {props: props, reg: EM_leggiRegistrazione_(sheet, table, Number(row), values, true)};
+  return {props: props, sheet: sheet, table: table, reg: EM_leggiRegistrazione_(sheet, table, Number(row), values, true)};
 }
 
 function EM_conLock_(work) {
   const lock = LockService.getScriptLock();
   if (!lock.tryLock(30000)) throw new Error("Email Matcher e gia in esecuzione.");
   try { return work(); } finally { lock.releaseLock(); }
+}
+
+function EM_salvaDecisioneOmonimo_(ctx, azione, email, indice, revisione) {
+    const reg = ctx.reg, data = reg.metadata.data;
+    if (data.firma !== reg.firma) delete data.validita;
+    data.firma = reg.firma;
+    reg.modificata = false;
+    reg.valida = data.validita ? data.validita.completata === true :
+      EM_FOGLI_SOLO_REGISTRAZIONI_VALIDE.some(function(n) { return EM_normalizzaSito_(n) === reg.sito; });
+    indice = indice || EM_costruisciIndiceEmail(ctx.props);
+    const contesto = EM_contestoOmonimo_(indice, reg.nome, reg);
+    delete data.daRivedere;
+    data.decisione = {contesto: contesto, azione: azione,
+      email: azione === "USA_EMAIL" ? EM_normalizzaEmail(email) : ""};
+    if (revisione) data.decisione.revisioneTelegram = revisione;
+    reg.metadata.item.setValue(JSON.stringify(data));
+    EM_aggiornaRevisione_(ctx.props, reg, {
+      stato: "DECISA", contesto: contesto, fonti: "Decisione manuale: " + azione
+    });
+    return data.decisione;
+}
+
+
+// ============================================================
+// REVISIONE OMONIMI DA TELEGRAM (v1.3.22)
+// Sessioni persistenti separate dalle decisioni: solo callback del
+// proprietario, legate al messaggio, all'account e al contesto verificato.
+// ============================================================
+const EM_TG_PREFIX = "EM_TG_OMONIMO_V1_";
+const EM_TG_TTL = 24 * 60 * 60 * 1000;
+const EM_TG_PAGE_SIZE = 5;
+
+function EM_telegramOmonimi_(method, payload) {
+  if (typeof bancoDashboardContext_ !== "undefined" && bancoDashboardContext_) {
+    throw new Error("La revisione omonimi e disponibile solo su Il Banco.");
+  }
+  if (["sendMessage", "editMessageText", "answerCallbackQuery"].indexOf(method) === -1 ||
+      typeof bancoApi_ !== "function") throw new Error("Operazione Telegram non disponibile.");
+  return bancoApi_(method, payload);
+}
+
+function EM_tgSalva_(props, session) {
+  const text = JSON.stringify(session);
+  if (encodeURIComponent(text).replace(/%[A-F0-9]{2}/gi, "x").length > 8000) {
+    throw new Error("Revisione troppo grande per il registro persistente.");
+  }
+  props.setProperty(EM_TG_PREFIX + session.nonce, text);
+}
+function EM_tgLeggi_(props, nonce) {
+  const text = props.getProperty(EM_TG_PREFIX + nonce);
+  if (!text) return null;
+  try {
+    const s = JSON.parse(text);
+    return s.v === 1 && s.nonce === nonce ? s : null;
+  } catch (_) { return null; }
+}
+function EM_tgPulisci_(props) {
+  const all = props.getProperties(), now = Date.now();
+  Object.keys(all).filter(k => k.indexOf(EM_TG_PREFIX) === 0).forEach(function(key) {
+    try {
+      const s = JSON.parse(all[key]);
+      if (Number.isFinite(s.created) && now - s.created > 7 * EM_TG_TTL) props.deleteProperty(key);
+    } catch (_) {}
+  });
+}
+function EM_tgBottone_(text, s, operation) {
+  return {text: text, callback_data: "emh:" + s.nonce + ":" + operation};
+}
+function EM_tgMail_(indice, name) {
+  const record = indice[EM_normalizzaNome(name)];
+  if (!record) return [];
+  return Object.keys(record.emails).filter(key => key.length <= 254 && EM_emailValida(key)).sort().map(function(key) {
+    return {email: key, fonti: Object.keys(record.emails[key].fonti).sort()};
+  });
+}
+function EM_tgTitolo_(s, reg) {
+  return "⚠️ Omonimo da revisionare\n" + reg.nome.slice(0, 160) +
+    "\n" + reg.foglio + " · riga " + reg.riga +
+    "\nUsername: " + (reg.username || "da verificare").slice(0, 100);
+}
+function EM_tgLista_(s, reg, emails, page) {
+  const last = Math.max(0, Math.ceil(emails.length / EM_TG_PAGE_SIZE) - 1);
+  page = Math.min(Math.max(0, page), last);
+  const start = page * EM_TG_PAGE_SIZE, current = emails.slice(start, start + EM_TG_PAGE_SIZE);
+  const buttons = current.map(function(item, i) {
+    return [EM_tgBottone_("Usa " + item.email.slice(0, 54), s, "s:" + (start + i))];
+  });
+  let text = EM_tgTitolo_(s, reg) + "\n\n" + s.reason.slice(0, 500) + "\n\n";
+  if (!emails.length) text += "Non risultano mail da proporre per questo nominativo.";
+  else {
+    text += "Mail trovate" + (last ? " · pagina " + (page + 1) + "/" + (last + 1) : "") + ":\n";
+    text += current.map(function(item, i) {
+      return (start + i + 1) + ". " + item.email + "\n" +
+        item.fonti.slice(0, 1).join("").slice(0, 150);
+    }).join("\n\n");
+  }
+  const navigation = [];
+  if (page > 0) navigation.push(EM_tgBottone_("◀ Precedenti", s, "p:" + (page - 1)));
+  if (page < last) navigation.push(EM_tgBottone_("Successive ▶", s, "p:" + (page + 1)));
+  if (navigation.length) buttons.push(navigation);
+  buttons.push([EM_tgBottone_("➕ Crea nuova mail", s, "n")]);
+  text += "\n\nScegli un'opzione: prima del salvataggio ti chiederò conferma.";
+  return {text: text, reply_markup: {inline_keyboard: buttons}};
+}
+function EM_tgConferma_(s, reg) {
+  const chosen = s.selection.action === "USA_EMAIL" ?
+    "Usare " + s.selection.email : "Accodare la creazione di una nuova mail";
+  return {text: EM_tgTitolo_(s, reg) + "\n\n" + chosen +
+    "?\n\nLa scelta verrà ricordata per questo account.",
+    reply_markup: {inline_keyboard: [[
+      EM_tgBottone_("✅ Conferma", s, "c:" + s.selection.token),
+      EM_tgBottone_("↩ Indietro", s, "b")
+    ]]}};
+}
+function EM_tgEsito_(s) {
+  const outcome = s.action === "USA_EMAIL" ? "Mail associata: " + s.email :
+    s.requestStatus === "CREATA" ?
+      "Nel Mugnaio risulta già una richiesta completata per questo account. Verifica la mail creata prima di un nuovo tentativo." :
+    ["ANNULLATA", "ERRORE"].indexOf(s.requestStatus) !== -1 ?
+      "La richiesta esistente va ripresa dal Mugnaio. La scelta resta salvata." :
+      "La richiesta di nuova mail è nel Mugnaio.";
+  return {text: "✅ Decisione salvata\n" + s.name + "\n" + s.sheetName +
+    " · riga " + s.row + "\n\n" + outcome, reply_markup: {inline_keyboard: []}};
+}
+function EM_tgModifica_(s, view) {
+  return EM_telegramOmonimi_("editMessageText", Object.assign({
+    chat_id: s.chat, message_id: s.message
+  }, view));
+}
+
+function EM_inviaRevisioneTelegram_(dest, result, indice) {
+  const props = PropertiesService.getScriptProperties();
+  const previous = dest.metadata.data.telegramReview;
+  const old = previous ? EM_tgLeggi_(props, previous) : null;
+  if (old && old.context === result.contesto && old.status === "OPEN" &&
+      old.message > 0 && Date.now() - old.created < EM_TG_TTL) return;
+  if (old && old.status === "APPLYING" && old.context === result.contesto &&
+      old.message > 0 && Date.now() - old.created < EM_TG_TTL) return;
+  if (old && (old.status === "OPEN" || old.status === "APPLYING")) {
+    old.status = "STALE"; EM_tgSalva_(props, old);
+    try { EM_tgModifica_(old, {text: "Questo avviso è stato sostituito da una revisione aggiornata.",
+      reply_markup: {inline_keyboard: []}}); } catch (_) {}
+  }
+  indice = indice || EM_costruisciIndiceEmail(props);
+  // Non inviare scelte calcolate su un indice diverso da quello del dubbio.
+  if (EM_contestoOmonimo_(indice, dest.nome, dest) !== result.contesto) {
+    throw new Error("Contesto della revisione cambiato.");
+  }
+  EM_tgPulisci_(props);
+  const s = {
+    v: 1, nonce: EM_hash_(Utilities.getUuid()).slice(0, 24), created: Date.now(),
+    status: "OPEN", context: result.contesto, reason: result.fonti.slice(0, 500),
+    chat: String(ADMIN_TELEGRAM_ID), message: 0,
+    spreadsheet: dest.spreadsheet, sheetId: dest.sheetId, sheetName: dest.foglio,
+    nameCol: dest.nameCol, accountId: dest.accountId, metadataId: dest.metadata.data.id,
+    registration: dest.id, name: dest.nome.slice(0, 160), row: dest.riga
+  };
+  EM_tgSalva_(props, s);
+  const sent = EM_telegramOmonimi_("sendMessage",
+    Object.assign({chat_id: s.chat}, EM_tgLista_(s, dest, EM_tgMail_(indice, dest.nome), 0)));
+  if (!sent || !Number.isSafeInteger(sent.message_id) || sent.message_id < 1) {
+    throw new Error("Avviso Telegram non confermato.");
+  }
+  s.message = sent.message_id;
+  EM_tgSalva_(props, s);
+  dest.metadata.data.telegramReview = s.nonce;
+  dest.metadata.data.avviso = result.contesto;
+  dest.metadata.item.setValue(JSON.stringify(dest.metadata.data));
+}
+
+function EM_tgContesto_(s, props) {
+  if (props.getProperty("SPREADSHEET_ID") !== s.spreadsheet ||
+      EM_TARGET_SHEETS.indexOf(s.sheetName) === -1) throw new Error("Destinazione non più disponibile.");
+  const book = SpreadsheetApp.openById(s.spreadsheet);
+  const sheet = book.getSheets().find(x => x.getSheetId() === s.sheetId);
+  if (!sheet || sheet.getName() !== s.sheetName) throw new Error("Foglio cambiato.");
+  const table = EM_trovaTabellaDestinazione(sheet);
+  if (table.nameCol !== s.nameCol) throw new Error("Colonne cambiate.");
+  let rows;
+  if (s.accountId && table.idCol) {
+    rows = sheet.getRange(table.headerRow + 1, table.idCol,
+      sheet.getLastRow() - table.headerRow, 1).getDisplayValues()
+      .map((r, i) => String(r[0]).trim() === s.accountId ? table.headerRow + 1 + i : 0).filter(Boolean);
+  } else {
+    const map = EM_mappaMetadata_(sheet);
+    rows = Object.keys(map).filter(k => map[k].data.id === s.metadataId)
+      .map(k => Number(k.split(":")[0]));
+  }
+  if (rows.length !== 1) throw new Error("Identità dell'account non univoca.");
+  const row = rows[0], range = sheet.getRange(row, 1, 1, sheet.getLastColumn());
+  const values = range.getDisplayValues()[0];
+  if (EM_rigaHaSfondoNonBianco(range.getBackgrounds()[0])) throw new Error("Riga non più elaborabile.");
+  const reg = EM_leggiRegistrazione_(sheet, table, row, values, false);
+  if (reg.id !== s.registration || !reg.metadata) throw new Error("Account cambiato.");
+  return {props: props, sheet: sheet, table: table, reg: reg,
+    email: String(values[table.emailCol - 1] || "").trim()};
+}
+
+
+function EM_tgVerificaCoda_(s, ctx) {
+  if (s.selection.action !== "USA_EMAIL") return;
+  const queueId = ctx.props.getProperty(EM_CREAZIONE_MAIL_PROPERTY);
+  if (!queueId) throw new Error("Configurazione coda mancante.");
+  const sheet = SpreadsheetApp.openById(queueId).getSheetByName(EM_CODA_SHEET_NAME);
+  if (!sheet) throw new Error("Coda non disponibile.");
+  EM_verificaIntestazioniSistema(sheet, EM_CODA_HEADERS);
+  const rows = sheet.getLastRow() > 1 ?
+    sheet.getRange(2, 1, sheet.getLastRow() - 1, EM_CODA_HEADERS.length).getDisplayValues() : [];
+  const request = EM_cercaRichiestaAccount(rows, s.spreadsheet, s.sheetName,
+    ctx.reg.riga, ctx.reg.nome, ctx.reg.accountId);
+  const existing = request && rows.find(r => String(r[0]) === request);
+  if (existing && EM_STATI_CODA_CHIUSI.indexOf(String(existing[3]).trim()) === -1) {
+    const error = new Error("Richiesta di creazione già aperta.");
+    error.emCode = "QUEUE_OPEN"; throw error;
+  }
+}
+
+function EM_tgApplica_(s, ctx) {
+  // Ultima rilettura protegge da correzioni effettuate mentre si costruiva l'indice.
+  const now = EM_tgContesto_(s, ctx.props);
+  if (now.reg.firma !== ctx.reg.firma) throw new Error("Riga cambiata durante la conferma.");
+  if (!EM_emailMancante(now.email)) {
+    if (s.action === "USA_EMAIL" && EM_normalizzaEmail(now.email) === s.email) return;
+    throw new Error("La riga contiene già una mail: non viene sovrascritta.");
+  }
+  if (s.action === "USA_EMAIL") {
+    now.sheet.getRange(now.reg.riga, now.table.emailCol).setValue(s.email);
+    SpreadsheetApp.flush();
+  } else {
+    s.requestId = EM_accodaCreazioneMail(ctx.props, s.spreadsheet, s.sheetName,
+      now.reg.riga, now.table.emailCol, now.reg.nome);
+    const queue = SpreadsheetApp.openById(ctx.props.getProperty(EM_CREAZIONE_MAIL_PROPERTY))
+      .getSheetByName(EM_CODA_SHEET_NAME);
+    const rows = queue.getLastRow() > 1 ?
+      queue.getRange(2, 1, queue.getLastRow() - 1, 4).getDisplayValues() : [];
+    const request = rows.find(r => String(r[0]) === s.requestId);
+    if (!request) throw new Error("Richiesta non riletta dopo l'accodamento.");
+    s.requestStatus = String(request[3]).trim();
+  }
+  s.row = now.reg.riga;
+}
+
+function EM_gestisciCallbackOmonimo_(update) {
+  const cb = update && update.callback_query;
+  if (!cb || String(cb.data || "").indexOf("emh:") !== 0) return false;
+  if (typeof bancoDashboardContext_ !== "undefined" && bancoDashboardContext_) return false;
+  const message = cb.message, chat = message && message.chat;
+  const owner = typeof ADMIN_TELEGRAM_ID === "undefined" ? "" : String(ADMIN_TELEGRAM_ID);
+  const answer = function(text) {
+    try { EM_telegramOmonimi_("answerCallbackQuery",
+      Object.assign({callback_query_id: cb.id}, text ? {text: text, show_alert: true} : {})); } catch (_) {}
+  };
+  if (!owner || !cb.from || cb.from.is_bot || String(cb.from.id) !== owner ||
+      !chat || chat.type !== "private" || String(chat.id) !== owner) {
+    answer("Scelta riservata al proprietario nella chat privata di Il Banco."); return true;
+  }
+  const m = String(cb.data).match(/^emh:([a-f0-9]{24}):(s:[0-9]{1,5}|p:[0-9]{1,4}|n|b|c:[a-f0-9]{12})$/);
+  if (!m) { answer("Pulsante non valido."); return true; }
+  const props = PropertiesService.getScriptProperties();
+  const initial = EM_tgLeggi_(props, m[1]);
+  if (!initial || initial.chat !== owner || initial.message !== message.message_id) {
+    answer("Questo pulsante non è più disponibile."); return true;
+  }
+  answer(); // Un acknowledgement scaduto non deve inghiottire la scelta.
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(5000)) {
+    try { EM_telegramOmonimi_("sendMessage", {chat_id: owner,
+      text: "EmailMatcher è occupato. Riprova lo stesso pulsante fra qualche secondo."}); } catch (_) {}
+    return true;
+  }
+  let s;
+  try {
+    s = EM_tgLeggi_(props, m[1]);
+    if (!s || s.message !== message.message_id || s.chat !== owner) return true;
+    if (s.status === "DONE") { EM_tgModifica_(s, EM_tgEsito_(s)); return true; }
+    if (s.status !== "OPEN" && s.status !== "APPLYING") {
+      EM_tgModifica_(s, {text: "Avviso superato. Usa la revisione più recente.", reply_markup: {inline_keyboard: []}});
+      return true;
+    }
+    const ctx = EM_tgContesto_(s, props);
+    const index = EM_costruisciIndiceEmail(props);
+    const context = EM_contestoOmonimo_(index, ctx.reg.nome, ctx.reg);
+    const ownDecision = ctx.reg.metadata.data.decisione;
+    const continuing = s.status === "APPLYING" && ownDecision &&
+      ownDecision.revisioneTelegram === s.nonce && ownDecision.contesto === context &&
+      ownDecision.azione === s.action && (ownDecision.email || "") === (s.email || "");
+    if ((!continuing && (context !== s.context || ownDecision)) ||
+        (s.status === "OPEN" && Date.now() - s.created >= EM_TG_TTL)) {
+      s.status = "STALE"; EM_tgSalva_(props, s);
+      EM_tgModifica_(s, {text: "I dati sono cambiati oppure l'avviso è scaduto. Nessuna nuova scelta applicata.",
+        reply_markup: {inline_keyboard: []}});
+      const result = EM_cercaNomeInIndice_(index, ctx.reg.nome, ctx.reg);
+      if (result.stato === "AMBIGUA") EM_aggiornaRevisione_(props, ctx.reg, result, index);
+      return true;
+    }
+    const op = m[2], emails = EM_tgMail_(index, ctx.reg.nome);
+    if (s.status === "APPLYING" && op !== "c:" + (s.selection && s.selection.token)) {
+      EM_tgModifica_(s, {text: "La scelta è già salvata. Premi Riprova per completare l'applicazione.",
+        reply_markup: {inline_keyboard: [[EM_tgBottone_("Riprova", s, "c:" + s.selection.token)]]}});
+      return true;
+    }
+    if (op === "b" || op.indexOf("p:") === 0) {
+      delete s.selection; EM_tgSalva_(props, s);
+      EM_tgModifica_(s, EM_tgLista_(s, ctx.reg, emails, op === "b" ? 0 : Number(op.slice(2))));
+      return true;
+    }
+    if (op === "n" || op.indexOf("s:") === 0) {
+      const item = op === "n" ? null : emails[Number(op.slice(2))];
+      if (op !== "n" && !item) throw new Error("Mail non disponibile.");
+      s.selection = {action: item ? "USA_EMAIL" : "NUOVA_MAIL", email: item ? item.email : "",
+        token: EM_hash_(Utilities.getUuid()).slice(0, 12)};
+      EM_tgSalva_(props, s);
+      EM_tgModifica_(s, EM_tgConferma_(s, ctx.reg)); return true;
+    }
+    if (!s.selection || op !== "c:" + s.selection.token) {
+      delete s.selection; EM_tgSalva_(props, s);
+      EM_tgModifica_(s, EM_tgLista_(s, ctx.reg, emails, 0)); return true;
+    }
+    if (!continuing) {
+      if (s.selection.action === "USA_EMAIL" && !emails.some(x => x.email === s.selection.email)) {
+        throw new Error("Mail non più presente fra i risultati.");
+      }
+      if (!EM_emailMancante(ctx.email)) throw new Error("La riga contiene già una mail.");
+      EM_tgVerificaCoda_(s, ctx);
+      s.status = "APPLYING"; s.action = s.selection.action; s.email = s.selection.email;
+      EM_tgSalva_(props, s);
+      EM_salvaDecisioneOmonimo_(ctx, s.action, s.email, index, s.nonce);
+      SpreadsheetApp.flush();
+    }
+    EM_tgApplica_(s, ctx);
+    s.status = "DONE"; EM_tgSalva_(props, s);
+    try { if (typeof bancoInvalidate_ === "function") bancoInvalidate_(); } catch (_) {}
+    EM_tgModifica_(s, EM_tgEsito_(s));
+  } catch (error) {
+    // Mai riportare eccezioni, token o contenuti grezzi del server in chat.
+    if (s && s.status === "DONE") {
+      try { EM_tgModifica_(s, EM_tgEsito_(s)); } catch (_) {}
+    } else if (s) {
+      const applying = s.status === "APPLYING" && s.selection;
+      try { EM_tgModifica_(s, {
+        text: error.emCode === "QUEUE_OPEN" ? "Esiste già una richiesta di creazione aperta per questo account. Gestiscila prima nel Mugnaio per evitare due mail." :
+          applying ? "Scelta salvata o in corso di salvataggio. Non ho potuto confermare l'esito. Premi Riprova." :
+          "Non posso applicare questa scelta ai dati attuali. Nessuna mail è stata sovrascritta. Riprova o verifica la riga.",
+        reply_markup: {inline_keyboard: applying ?
+          [[EM_tgBottone_("Riprova", s, "c:" + s.selection.token)]] :
+          [[EM_tgBottone_("↩ Torna alle scelte", s, "b")]]}
+      }); } catch (_) {}
+    }
+    console.warn("Revisione Telegram non completata; stato conservato per verifica/riprova.");
+  } finally { lock.releaseLock(); }
+  return true;
 }
