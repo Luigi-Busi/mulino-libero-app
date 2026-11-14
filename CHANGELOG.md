@@ -1,6 +1,6 @@
-## v1.3.23 — candidata — Tester per numero di telefono
+## v1.3.23 — 14 novembre 2026 — Tester per numero di telefono
 
-PREPARATA, NON INSTALLATA: installazione rinviata su richiesta del proprietario.
+Installata dopo il via libera del proprietario; controlli Linux del rilascio superati e pausa iniziale conservata.
 
 - Numero della Whitelist come etichetta principale nell'elenco Tester,
   nel dettaglio e nella conferma di azzeramento, riservati al privato del proprietario.
@@ -8,7 +8,7 @@ PREPARATA, NON INSTALLATA: installazione rinviata su richiesta del proprietario.
   identità, conteggi, azzeramenti e comandi manuali restano associati all'ID Telegram.
 - Nessuna modifica a dati, Whitelist, coda, assegnazioni o procedura SMS.
 - 25 test mirati superati; dettagli in ops/tester-phone-labels.md.
-- Nessun tag, merge su main o deploy finché non arriva il via libera all'installazione.
+- Tag v1.3.23 installato con la procedura ordinaria; v1.3.20 conservata per il ripristino.
 
 ## v1.3.22 — 14 novembre 2026 — scelta degli omonimi in Telegram
 

@@ -1,7 +1,8 @@
-# Tester per numero di telefono — v1.3.23 candidata
+# Tester per numero di telefono — v1.3.23
 
-**PREPARATA, NON INSTALLATA.** L'installazione resta sospesa fino al via libera
-esplicito del proprietario, che ha segnalato richieste in coda.
+**INSTALLATA il 14 novembre 2026**, dopo il via libera esplicito del proprietario.
+Il controller ha confermato v1.3.23 (commit cd63187) e conserva v1.3.20 come ripristino.
+La pausa già presente è stata mantenuta; nessuna registrazione era in corso.
 
 ## Comportamento preparato
 
@@ -41,13 +42,15 @@ python -m unittest discover -s tests -p test_tester_stats.py -k TesterPanelTests
 python -m unittest discover -s tests -p test_telegram_panel.py -k PanelTests -v
 ```
 
-## Installazione rinviata
+## Installazione verificata
 
-Non sono stati pubblicati tag di rilascio né eseguiti comandi di deploy, pausa,
-riavvio o modifica del container. La proposta resta in un ramo dedicato e in PR
-bozza; il codice attivo continua a usare la versione precedente.
+Il proprietario ha autorizzato l'installazione dopo la preparazione separata.
+Pubblicato il tag v1.3.23 e usati mulino-deploy check e il normale deploy con
+pausa persistente, assenza di operazioni in corso e compatibilità dei dati.
+Il controller ha confermato Git, immagine, mount e configurazione coerenti,
+senza transazioni pendenti. Le verifiche del rilascio Linux sono superate.
 
-Dopo l'autorizzazione del proprietario, usare la normale procedura Git e
-`ops/deploy/README.md`: verifica del tag, pausa salvata e attesa della conclusione
-delle operazioni attive prima della sostituzione. Le richieste pendenti non
-richiedono migrazioni né cancellazioni. Nessuna modifica ad Apps Script.
+Il nuovo container mantiene la pausa trovata prima dell'intervento.
+L'installazione non ha richiesto migrazioni, cancellazioni o modifiche alla Whitelist.
+Per visualizzare le nuove etichette aprire /menu e poi Tester.
+La ripresa della coda resta un'azione esplicita del proprietario.
