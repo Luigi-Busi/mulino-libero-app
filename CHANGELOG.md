@@ -1,3 +1,14 @@
+## v1.3.25 — candidata — Ripartenza dopo scadenza esplicita
+
+- Riconosce «Tempo di registrazione scaduto. Inizia una nuova registrazione.»
+  sul modulo iniziale Libero, anche durante l'attesa del CAPTCHA o del tester.
+- Chiude il browser scaduto e riparte da zero per la stessa richiesta/persona,
+  riutilizzando i dati anagrafici e invalidando la vecchia assegnazione SMS.
+- Massimo due ripartenze automatiche; reset generici, esiti già registrati e
+  verifica SMS già completata restano soggetti a revisione. Rispetta pausa e annullamento.
+- Nessuna nuova riga, colonna o migrazione. Dettagli in ops/registration-expired.md.
+- Preparata, non installata.
+
 ## v1.3.24 — 14 novembre 2026 — Cambio tester dalla finestra SMS
 
 - Dopo scadenza o cambio tester, riconosce la finestra «VERIFICA DEL TUO ACCOUNT»

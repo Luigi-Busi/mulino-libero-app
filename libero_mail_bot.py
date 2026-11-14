@@ -157,6 +157,10 @@ class RegistrationSessionReset(RegistrationError):
     """Il modulo iniziale è riapparso dopo l'avvio della verifica telefonica."""
 
 
+class RegistrationExpired(RegistrationSessionReset):
+    """The initial form explicitly confirms that registration time expired."""
+
+
 class RequestCancelled(RegistrationError):
     """Richiesta annullata dall'amministratore."""
 
@@ -829,6 +833,7 @@ class RegistrationBrowser:
                     self.diagnostics.failure(exc)
                     reason = self.diagnostics.reason
                     if isinstance(exc, PlaywrightTimeoutError):
+                        await self._check_cancelled()
                         raise RegistrationError(f"Tempo scaduto durante: {self.stage}.") from None
                     raise
                 finally:
@@ -1990,6 +1995,7 @@ class RegistrationBrowser:
 
     async def _captcha_resume_ready(self, starting_url: str) -> bool:
         assert self.page
+        await self._check_cancelled()
         if await self._captcha_completed():
             return True
         # Se l'utente ha già premuto Avanti nel sito, il widget e il suo segnale
@@ -2102,9 +2108,30 @@ class RegistrationBrowser:
             "Il contenuto della pagina non viene salvato per proteggere i dati personali.",
         )
 
+    async def _raise_if_registration_expired(self) -> None:
+        if self.page is None:
+            return
+        parts = urlsplit(self.page.url)
+        if parts.scheme != 'https' or parts.hostname != 'registrazione.libero.it':
+            return
+        banner = self.page.get_by_text(re.compile(
+            r'^\s*Tempo di registrazione scaduto\.\s*Inizia una nuova registrazione\.\s*$', re.I))
+        if not any([await item.is_visible() for item in await banner.all()]):
+            return
+        if (await self.page.locator('#username').is_visible()
+                and await self.page.locator('#password').is_visible()
+                and await self._find_otp_input(require_editable=False) is None):
+            raise RegistrationExpired('Tempo di registrazione scaduto. Inizia una nuova registrazione.')
+
     async def _check_cancelled(self) -> None:
         if self.coordinator.cancel_event.is_set():
             raise RequestCancelled("Richiesta annullata dall'amministratore")
+        try:
+            await self._raise_if_registration_expired()
+        except PlaywrightError:
+            if self.page.is_closed():
+                raise RegistrationError('Browser chiuso durante il controllo della scadenza.') from None
+            # A document being replaced is not proof of expiration.
 
 
 def audit_queue_records(rows: list) -> tuple[list, list]:
@@ -3216,9 +3243,27 @@ class Coordinator:
                 STATO="IN_CREAZIONE",
                 NOTE="Dati anagrafici ricevuti; avvio browser",
             )
-            username, email = await RegistrationBrowser(
-                self.settings, self
-            ).create_account(request, personal)
+            for restart in range(3):
+                try:
+                    if self.cancel_event.is_set():
+                        raise RequestCancelled('Richiesta annullata dall’amministratore')
+                    if restart:
+                        if self.paused:
+                            raise RegistrationSessionReset('Ripartenza interrotta: Mugnaio in pausa.')
+                        if request.account_id:
+                            await asyncio.to_thread(self.store.validate_start, request)
+                    username, email = await RegistrationBrowser(
+                        self.settings, self
+                    ).create_account(request, personal)
+                    break
+                except RegistrationExpired:
+                    # A generic reset/timeout never authorizes a new registration.
+                    if (restart == 2 or self.paused
+                            or request.request_id in self.sms_verified
+                            or request.request_id in self.outcomes.ids()
+                            or request.request_id in self.created_in_memory):
+                        raise
+                    await self.restart_expired_registration(request, restart + 1)
             self.record_created(request, username, email)
             if not await self.sync_outcome(request.request_id):
                 await self.safe_notice(self.settings.admin_id,
@@ -3299,6 +3344,31 @@ class Coordinator:
                     "⏸ La richiesta e terminata. La coda resta in pausa. "
                     + ("Ora puoi aggiornare il programma; al termine usa /riprendi."
                        if self.pause_persisted else "La pausa non e salvata: riprova /pausa prima di riavviare."))
+
+    async def restart_expired_registration(self, request: QueueRequest, attempt: int) -> None:
+        old_tester = request.claimed_by
+        self.invalidate_phone_session()
+        async with self._claim_lock:
+            # A claim already writing to Sheets must finish before it is cleared.
+            old_tester = request.claimed_by or old_tester
+            self.assigned_phone = ''
+            self.phone_future = self.otp_future = None
+            self.change_tester_event.clear()
+            self.resend_busy = False
+            self.last_sms_request_at = float('-inf')
+            self.revoked_testers.clear()
+            self.revoked_phones.clear()
+            await self.set_queue_fields(request, STATO='IN_CREAZIONE', ERRORE='',
+                TELEGRAM_ASSEGNATO='', TELEFONO_MASCHERATO='', MESSAGGIO_GRUPPO_ID='',
+                NOTE=f'Sessione Libero scaduta: ripartenza automatica {attempt}/2 con gli stessi dati')
+        await self.cleanup_messages(request)
+        if old_tester:
+            await self.safe_notice(int(old_tester),
+                '⌛ La sessione Libero è scaduta. Non inviare altri codici: '
+                'il bot riparte con una nuova sessione e una nuova richiesta del numero.')
+        await self.safe_notice(self.settings.admin_id,
+            f'⌛ Tempo di registrazione Libero scaduto. Riparto da zero per la stessa persona '
+            f'con i dati già ricevuti ({attempt}/2). ID: {request.request_id}')
 
     def track_registration_notice(self, sent) -> None:
         """Register only this successfully sent admin notice; never scan chat history."""

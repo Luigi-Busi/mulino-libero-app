@@ -189,7 +189,7 @@ class RegistrationFlowTests(unittest.IsolatedAsyncioTestCase):
             wait_for_registration_outcome=AsyncMock(return_value="created"),
         )
         self.browser = worker.RegistrationBrowser(SimpleNamespace(), self.coordinator)
-        self.browser.page = SimpleNamespace(wait_for_timeout=AsyncMock(), is_closed=Mock(return_value=False))
+        self.browser.page = SimpleNamespace(url='about:blank', wait_for_timeout=AsyncMock(), is_closed=Mock(return_value=False))
         for name in ("_handle_captcha_if_needed", "_fill_account_protection", "_check_required_boxes", "_choose_phone_and_send", "_verify_sms_until_completed", "_click_and_wait_for_change"):
             setattr(self.browser, name, AsyncMock())
         self.browser._is_success_page = AsyncMock(return_value=False)
