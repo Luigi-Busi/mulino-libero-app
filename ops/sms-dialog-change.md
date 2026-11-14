@@ -1,6 +1,8 @@
 # Cambio tester dalla finestra di verifica SMS — v1.3.24
 
-Preparata, non installata. Alla verifica iniziale il Mugnaio aveva una registrazione attiva.
+Installata il 14 novembre 2026 dopo autorizzazione del proprietario.
+Prima della sostituzione sono state verificate pausa, assenza di registrazioni attive
+e assenza di attese umane. La pausa è stata mantenuta.
 
 ## Problema e comportamento
 
@@ -27,6 +29,7 @@ che riproduce i testi e le transizioni osservabili, senza numeri reali o account
 Dieci nuove prove coprono numero conservato/vuoto, link di chiusura, ambiguità,
 controlli esterni o disabilitati, mancata transizione, reset e ordine della revoca.
 Superati anche i 19 test esistenti di timeout/cambio tester e i 16 di reset sessione.
+Suite completa Linux: 305 test superati; controlli preliminari e installazione confermati dal controller.
 
 Falsi positivi: una chiusura estranea potrebbe portare a un'altra schermata.
 Il riconoscimento combinato e la verifica successiva impediscono di assegnare
@@ -38,6 +41,10 @@ riconosciute richiedono ancora intervento manuale. Non si indovinano selettori
 da coordinate fotografiche. Il primo cambio reale resta da osservare dopo il rilascio.
 
 ## Rilascio
+
+Tag installato: v1.3.24, commit 4ee34e1f48041ae9fc78d8e073312808b3119e2e.
+Controller senza transazioni pendenti, Git/immagine/mount/configurazione coerenti.
+Versione precedente disponibile per ripristino: v1.3.23.
 
 Usare il controller descritto in ops/deploy/README.md. Il controllo del tag può
 essere eseguito durante il lavoro attivo; la sostituzione del container richiede

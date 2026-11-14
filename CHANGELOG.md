@@ -1,4 +1,4 @@
-## v1.3.24 — candidata — Cambio tester dalla finestra SMS
+## v1.3.24 — 14 novembre 2026 — Cambio tester dalla finestra SMS
 
 - Dopo scadenza o cambio tester, riconosce la finestra «VERIFICA DEL TUO ACCOUNT»
   e ne usa la chiusura univoca per tornare a Cellulare, anche senza «Modifica numero».
@@ -8,7 +8,9 @@
   Finestre incomplete/ambigue richiedono ancora revisione manuale.
 - Nessuna migrazione o modifica a dati, segreti, timeout o ruoli permanenti.
 - 10 nuove regressioni con HTML fittizio e 19 test esistenti del cambio tester superati.
-  Procedura e limiti in ops/sms-dialog-change.md. Non ancora installata.
+  Suite completa Linux di 305 test e controlli del rilascio superati.
+  Installata dopo autorizzazione del proprietario, verificando pausa e assenza di lavoro attivo.
+  Pausa conservata; v1.3.23 disponibile per il ripristino. Procedura e limiti in ops/sms-dialog-change.md.
 
 ## v1.3.23 — 14 novembre 2026 — Tester per numero di telefono
 
