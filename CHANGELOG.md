@@ -4,7 +4,9 @@
   correzione, provenienza, menu e collegamento EmailMatcher.
 - Betsson tra destinazioni e sorgenti della ricerca mail; controllo di coerenza
   Mugnaio esteso al nuovo foglio. Intestazioni reali riga 9, mail in F.
-- 23 nuove regressioni; dettagli e stato della pubblicazione in ops/betsson.md.
+- 23 nuove regressioni e suite completa di 322 test superati.
+- Installata: Apps Script 43 (precedente 42), Mugnaio v1.3.28 (ripristino v1.3.27).
+- Pausa mantenuta; dettagli in ops/betsson.md.
 
 ## v1.3.27 — 15 novembre 2026 — Betflag
 

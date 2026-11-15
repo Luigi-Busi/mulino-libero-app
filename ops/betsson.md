@@ -44,4 +44,17 @@ Rollback Apps Script e worker separati, senza cancellare mail o dati inseriti.
 Nessuna modifica a data/ o secrets/. Il primo inserimento reale resta il
 riscontro operativo del flusso pubblicato.
 
-Stato installazione: in preparazione.
+Stato installazione: completata il 15 novembre 2026.
+
+Apps Script versione 43 (precedente 42): HEAD e versione pubblicata riletti e
+coincidenti, altri tre file byte per byte invariati, endpoint/accessi invariati.
+Banco SHA-256: a35e639516a3ff0bfcf90fb183c0a64971ac7518e4510c5760548d22fc68d325.
+EmailMatcher SHA-256: 2b8bcf73eba87e1b9a255ca7203e4ef36c544458559abf272280dd9247d88968.
+Anche RecuperoEmailMancanti usa EM_TARGET_SHEETS, quindi include il nuovo foglio.
+
+Mugnaio v1.3.28, commit 409faa8b83c975759903ac773eb921219316f4a9.
+322 test e controlli preliminari superati. Prima della sostituzione verificati
+pausa persistente, assenza di registrazioni e assenza di attese umane.
+Installazione confermata, nessuna transazione pendente, Git/immagine/mount/
+configurazione coerenti. Primo ciclo Telegram/coda verificato e pausa mantenuta.
+Ripristino worker disponibile: v1.3.27. Nessun account di prova inserito.
