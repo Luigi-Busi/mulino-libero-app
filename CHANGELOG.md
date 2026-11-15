@@ -1,3 +1,15 @@
+## v1.3.29 — 15 novembre 2026 — Identità di riga EmailMatcher
+
+- Corretto il salvataggio dei metadati: Apps Script richiede un intervallo
+  di riga non delimitato da colonne, non un rettangolo della larghezza attuale.
+- Il simulatore riproduce ora il rifiuto reale di Google; aggiunta regressione
+  che distingue un rettangolo a larghezza piena dalla notazione riga:riga.
+- Cinque suite Apps Script superate e accodamento reale verificato su due
+  richieste mirate, con identificativi distinti e decisione omonimo persistente.
+- Solo Apps Script: pubblicazione definitiva 46, normale Codice.gs conservato;
+  operazione temporanea rimossa. Mugnaio v1.3.28 non riavviato.
+- Dettagli in ops/row-metadata-fix.md.
+
 ## v1.3.28 — 15 novembre 2026 — Betsson
 
 - Betsson🎰 integrato nel Banco come destinazione standard, con inserimento,

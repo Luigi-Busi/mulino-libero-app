@@ -2663,7 +2663,9 @@ function EM_leggiRegistrazione_(sheet, table, row, values, persist, metadata) {
   const firma = EM_hash_([EM_normalizzaNome(nome), username, dateRaw]);
   if (!saved && persist) {
     const data = {v: 1, id: Utilities.getUuid(), firma: firma, colonna: table.nameCol};
-    sheet.getRange(row, 1, 1, sheet.getMaxColumns()).addDeveloperMetadata(
+    // A bounded A:Z rectangle is rejected by Apps Script even at full grid width.
+    // Row notation leaves columns unbounded and creates ROW-scoped metadata.
+    sheet.getRange(row + ":" + row).addDeveloperMetadata(
       EM_METADATA_KEY, JSON.stringify(data)
     );
     saved = EM_mappaMetadata_(sheet)[row + ":" + table.nameCol];

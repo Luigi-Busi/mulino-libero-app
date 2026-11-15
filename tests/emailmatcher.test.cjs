@@ -34,6 +34,7 @@ class Range {
     return this;
   }
   addDeveloperMetadata(key, value) {
+    assert.equal(this.entireRow, true, "Apps Script requires unbounded row notation for ROW metadata");
     assert.equal(this.col, 1);
     assert.equal(this.width, this.sheet.getMaxColumns(), "metadata must cover entire row");
     this.sheet.meta.push(new Metadata(this.sheet, this.row, key, value));
@@ -63,6 +64,11 @@ class Sheet {
   getMaxColumns() { return Math.max(30, this.getLastColumn()); }
   getRange(row, col, height, width) {
     if (row === "A1") return new Range(this, 1, 1);
+    if (typeof row === "string" && /^(\d+):\1$/.test(row)) {
+      const range = new Range(this, Number(row.split(":")[0]), 1, 1, this.getMaxColumns());
+      range.entireRow = true;
+      return range;
+    }
     return new Range(this, row, col, height, width);
   }
   createDeveloperMetadataFinder() {
@@ -524,6 +530,14 @@ test("Snai rule can classify records without activating the archived sheet", () 
   const reg=f.context.EM_leggiRegistrazione_(sheet,table,3,sheet.cells[2],false);
   assert.equal(f.context.EM_cercaNomeInIndice_(f.index(),reg.nome,reg).stato,"NON TROVATA");
   assert.equal(f.queue().length,1);
+});
+
+test("bounded full-width rectangles reproduce Google's metadata rejection", () => {
+  const f=fixture();
+  assert.throws(() => f.sheet.getRange(3,1,1,f.sheet.getMaxColumns()).addDeveloperMetadata('key','value'), /unbounded row/);
+  assert.equal(f.sheet.meta.length,0);
+  f.reg(3,true);
+  assert.equal(f.sheet.meta.length,1);
 });
 
 if (require.main === module) process.stdout.write(count + " EmailMatcher regression cases passed.\n");
