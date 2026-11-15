@@ -6,7 +6,9 @@
   la data originale e senza toccare mail, password mail o colonne dei bonus.
 - Nuovo foglio tra destinazioni e sorgenti EmailMatcher e nel controllo Mugnaio.
   Betflag Luigi, Normie e Davide in Slotting rimangono solo sorgenti di ricerca.
-- 43 nuove regressioni; dettagli e stato del rilascio in ops/betflag.md.
+- 43 nuove regressioni e suite completa di 321 test superati.
+- Installata: Apps Script 42 (precedente 41) e Mugnaio v1.3.27 (ripristino v1.3.26).
+- Pausa conservata; dettagli in ops/betflag.md.
 
 ## v1.3.26 — 15 novembre 2026 — Sisal Slot 600
 

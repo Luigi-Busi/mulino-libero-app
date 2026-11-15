@@ -59,4 +59,16 @@ Ripristino: precedente deployment Apps Script e precedente tag worker separati,
 senza cancellare inserimenti/mail già completati. Nessuna modifica a data/ o secrets/.
 Il primo messaggio reale resta la verifica operativa del flusso pubblicato.
 
-Stato installazione: in preparazione.
+Stato installazione: completata il 15 novembre 2026.
+
+Apps Script versione 42 (precedente 41): HEAD e sorgente della versione pubblicata
+riletti e coincidenti; altri tre file, endpoint e accessi invariati.
+Banco SHA-256: 90b0dc2e8bd4c34d53a70d855406a7739d2e9be4ff7cb87bf9e43734e0bf90a1.
+EmailMatcher SHA-256: 9983b1c663ae6adaa8613456853fd7d86b6596d7d1511bb0601cbd0e09fdc2b0.
+
+Mugnaio v1.3.27, commit 41fed953cd37b0c724750b4e24f2f5fa25636457.
+Suite completa 321 test e controlli preliminari superati. Prima del riavvio
+verificate pausa persistente, assenza di registrazioni e assenza di attese umane.
+Installazione confermata, nessuna transazione pendente, Git/immagine/mount/
+configurazione coerenti. Pausa mantenuta; ripristino worker disponibile v1.3.26.
+Nessun account di prova inserito e nessuna modifica ai dati degli archivi.
