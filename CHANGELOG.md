@@ -1,3 +1,13 @@
+## v1.3.27 — 15 novembre 2026 — Betflag
+
+- Nuovo Betflag in Matched & Arbitrage: parser dedicato per SPID/CIEID e Normie,
+  data di ricezione Telegram in Italia e scrittura delle colonne richieste.
+- IBAN e 16 cifre Postepay conservati come testo; correzioni senza cambiare
+  la data originale e senza toccare mail, password mail o colonne dei bonus.
+- Nuovo foglio tra destinazioni e sorgenti EmailMatcher e nel controllo Mugnaio.
+  Betflag Luigi, Normie e Davide in Slotting rimangono solo sorgenti di ricerca.
+- 43 nuove regressioni; dettagli e stato del rilascio in ops/betflag.md.
+
 ## v1.3.26 — 15 novembre 2026 — Sisal Slot 600
 
 - Banco: SISAL 600 🎰 indirizzato a Sisal Slot 600 prima del riconoscimento generico

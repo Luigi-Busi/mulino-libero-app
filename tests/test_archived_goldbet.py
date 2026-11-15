@@ -19,8 +19,8 @@ class ArchivedSheetAuditTests(unittest.TestCase):
         request=SimpleNamespace(destination_spreadsheet='fixture-main',destination_sheet='PokerStars')
         result,calls=self.snapshot([(request,'','')])
         self.assertNotIn('GoldBet',calls)
-        self.assertEqual(result['scan_keys'],{('fixture-main',n) for n in ('PokerStars','Sisal Sport','Sisal Slot 600','MyLotteriesPlay')})
-        self.assertEqual(set(calls),{'PokerStars','Sisal Sport','Sisal Slot 600','MyLotteriesPlay'})
+        self.assertEqual(result['scan_keys'],{('fixture-main',n) for n in ('PokerStars','Sisal Sport','Sisal Slot 600','Betflag','MyLotteriesPlay')})
+        self.assertEqual(set(calls),{'PokerStars','Sisal Sport','Sisal Slot 600','Betflag','MyLotteriesPlay'})
 
     def test_explicit_historical_destination_is_still_checked(self):
         request=SimpleNamespace(destination_spreadsheet='fixture-archive',destination_sheet='GoldBet Old')

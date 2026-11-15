@@ -29,6 +29,9 @@ class EmailMatcherTests(unittest.TestCase):
     def test_sisal_slot600_integration(self):
         self.run_node_suite("sisal-slot600.test.cjs")
 
+    def test_betflag_integration(self):
+        self.run_node_suite("betflag.test.cjs")
+
 
 if __name__ == "__main__":
     unittest.main()

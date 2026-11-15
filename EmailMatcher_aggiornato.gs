@@ -94,6 +94,7 @@ const EM_TEST_TARGET_ROW = 0;
 // ============================================================
 
 const EM_TARGET_SHEETS = [
+  "Betflag",
   "PokerStars",
   "Sisal Sport",
   "Sisal Slot 600",
@@ -112,6 +113,7 @@ const EM_SOURCE_GROUPS = [
     label: "Matched & Arbitrage",
 
     sheets: [
+      "Betflag",
       "PokerStars",
       "Sisal Sport",
       "Sisal Slot 600",
@@ -148,7 +150,9 @@ const EM_SOURCE_GROUPS = [
     label: "Slotting",
 
     sheets: [
-      "Betflag Luigi"
+      "Betflag Luigi",
+      "Betflag Normie",
+      "Betflag Davide"
     ]
   }
 ];
@@ -1375,7 +1379,7 @@ function EM_trovaTabelleSorgente(
           usernameCol: EM_colonnaUnica_(valori[r], nameCols, nameCol,
             ["username", "user", "nome utente"]),
           dateCol: EM_colonnaUnica_(valori[r], nameCols, nameCol,
-            ["data apertura", "data di apertura"]),
+            ["data apertura", "data di apertura", "data registrazione"]),
           idCol: EM_colonnaUnica_(valori[r], nameCols, nameCol, ["id mulino"])
         });
       }
@@ -2580,7 +2584,8 @@ function EM_famigliaSito_(value) {
   const archives = {
     pokerstarsold: "pokerstars", sisalold: "sisalsport", sisalold2: "sisalsport",
     sisal1kold: "sisalsport", mylotteriesplayold: "mylotteriesplay",
-    goldbetold: "goldbet"
+    goldbetold: "goldbet",
+    betflagluigi: "betflag", betflagnormie: "betflag", betflagdavide: "betflag"
   };
   return Object.prototype.hasOwnProperty.call(archives, site) ? archives[site] : site;
 }
@@ -2606,7 +2611,7 @@ function EM_colonnaUnica_(headers, nameCols, nameCol, aliases) {
 }
 
 function EM_giornoRegistrazione_(value) {
-  // Solo la Data apertura del foglio, mai data della scansione o nascita.
+  // Solo Data apertura/registrazione del foglio, mai scansione o nascita.
   // getDisplayValues: formato italiano documentato da scriviRiga di Il Banco.
   const text = String(value || "").trim();
   const m = text.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
