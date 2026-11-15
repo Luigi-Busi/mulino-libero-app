@@ -6,6 +6,8 @@
   gestione degli omonimi, mantenendo distinta l'identità di Sisal Sport.
 - Mugnaio: scrittura mail già generica e controllo di coerenza esteso al nuovo foglio.
 - Formato reale verificato: riga intestazioni 9, nome D, username E, e-mail G.
+- Installata: Apps Script 41 (precedente 40), Mugnaio v1.3.26 (ripristino v1.3.25).
+- Suite completa: 320 test superati; pausa e assenza di registrazioni attive verificate prima del riavvio.
 - Dettagli e verifica del rilascio in ops/sisal-slot600.md.
 
 ## v1.3.25 — 14 novembre 2026 — Ripartenza dopo scadenza esplicita

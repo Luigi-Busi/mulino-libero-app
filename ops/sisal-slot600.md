@@ -53,4 +53,17 @@ Il controller ordinario verifica e installa il worker con pausa persistente
 e nessuna registrazione attiva. Il ripristino richiede il rollback separato
 di Apps Script e del worker; non cancella righe, mail o richieste già inserite.
 
-Stato installazione: in preparazione.
+Stato installazione: completata il 15 novembre 2026.
+
+Apps Script: versione 41 sul deployment esistente (precedente 40); HEAD e versione
+pubblicata riletti e coincidenti, endpoint/accessi invariati e altri tre file invariati.
+Banco SHA-256: 2536ff75c1a032b45bb8636c7eaaaecde1cb808b1ec7ce6e0079d46157c3e30b.
+EmailMatcher SHA-256: 970d9ad6c04be3701ba5cd13f034f7b18ed375611436b79bb80b77e3c8704945.
+
+Mugnaio: v1.3.26, commit 9050dc54fc5605fc65f68841ee7c6aebf4cd972c.
+Suite completa 320 test e controlli preliminari superati. Prima della sostituzione
+verificate pausa persistente e assenza di registrazioni/attese umane.
+Controller senza transazioni pendenti, Git/immagine/mount/configurazione coerenti;
+primo ciclo Telegram e coda verificati, pausa mantenuta. Ripristino worker: v1.3.25.
+Nessun dato o account di prova inserito, nessuna modifica a data/ o secrets/.
+Il primo inserimento reale resta il riscontro operativo del flusso pubblicato.
