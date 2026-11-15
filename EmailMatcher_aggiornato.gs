@@ -28,11 +28,11 @@ const EM_TIMEZONE = "Europe/Rome";
 
 // Solo questi fogli hanno il vincolo operativo dei 20 giorni.
 // La normalizzazione non accorpa "Sisal Old", "Sisal Sport", "Snai", ecc.
-const EM_SITI_REGOLA_20_GIORNI = ["PokerStars", "Sisal Sport", "Snai Sport"];
+const EM_SITI_REGOLA_20_GIORNI = ["PokerStars", "Sisal Sport", "Sisal Slot 600", "Snai Sport"];
 // Confermato dal proprietario: questi fogli contengono solo conti gia aperti.
 // Lasciare vuoto se il processo di inserimento cambia.
 // In alternativa usare impostaValiditaRegistrazione_() dopo verifica manuale.
-const EM_FOGLI_SOLO_REGISTRAZIONI_VALIDE = ["PokerStars", "Sisal Sport", "Snai Sport"];
+const EM_FOGLI_SOLO_REGISTRAZIONI_VALIDE = ["PokerStars", "Sisal Sport", "Sisal Slot 600", "Snai Sport"];
 const EM_METADATA_KEY = "EM_REGISTRAZIONE_V1";
 const EM_REVISIONI_SHEET = "RevisioniOmonimi";
 const EM_REVISIONI_HEADERS = [
@@ -96,6 +96,7 @@ const EM_TEST_TARGET_ROW = 0;
 const EM_TARGET_SHEETS = [
   "PokerStars",
   "Sisal Sport",
+  "Sisal Slot 600",
   "MyLotteriesPlay"
 ];
 
@@ -113,6 +114,7 @@ const EM_SOURCE_GROUPS = [
     sheets: [
       "PokerStars",
       "Sisal Sport",
+      "Sisal Slot 600",
       "MyLotteriesPlay",
       "Sisal Lott.",
 
