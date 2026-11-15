@@ -32,6 +32,9 @@ class EmailMatcherTests(unittest.TestCase):
     def test_betflag_integration(self):
         self.run_node_suite("betflag.test.cjs")
 
+    def test_betsson_integration(self):
+        self.run_node_suite("betsson.test.cjs")
+
 
 if __name__ == "__main__":
     unittest.main()

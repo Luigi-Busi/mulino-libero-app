@@ -1,3 +1,11 @@
+## v1.3.28 — 15 novembre 2026 — Betsson
+
+- Betsson🎰 integrato nel Banco come destinazione standard, con inserimento,
+  correzione, provenienza, menu e collegamento EmailMatcher.
+- Betsson tra destinazioni e sorgenti della ricerca mail; controllo di coerenza
+  Mugnaio esteso al nuovo foglio. Intestazioni reali riga 9, mail in F.
+- 23 nuove regressioni; dettagli e stato della pubblicazione in ops/betsson.md.
+
 ## v1.3.27 — 15 novembre 2026 — Betflag
 
 - Nuovo Betflag in Matched & Arbitrage: parser dedicato per SPID/CIEID e Normie,

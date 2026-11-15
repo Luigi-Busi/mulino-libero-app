@@ -554,7 +554,7 @@ class GoogleQueueStore:
 
     def consistency_snapshot(self) -> dict[str, Any]:
         records, malformed = audit_queue_records(self.queue.get_all_values())
-        active_sheets = {"PokerStars", "Sisal Sport", "Sisal Slot 600", "Betflag", "MyLotteriesPlay"}
+        active_sheets = {"PokerStars", "Sisal Sport", "Sisal Slot 600", "Betflag", "Betsson", "MyLotteriesPlay"}
         books = {r.destination_spreadsheet for r, _, _ in records if r.destination_sheet in active_sheets}
         keys = {(r.destination_spreadsheet, r.destination_sheet) for r, _, _ in records}
         keys.update((book, name) for book in books for name in active_sheets)

@@ -94,6 +94,7 @@ const EM_TEST_TARGET_ROW = 0;
 // ============================================================
 
 const EM_TARGET_SHEETS = [
+  "Betsson",
   "Betflag",
   "PokerStars",
   "Sisal Sport",
@@ -113,6 +114,7 @@ const EM_SOURCE_GROUPS = [
     label: "Matched & Arbitrage",
 
     sheets: [
+      "Betsson",
       "Betflag",
       "PokerStars",
       "Sisal Sport",
