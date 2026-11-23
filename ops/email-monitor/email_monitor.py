@@ -27,7 +27,7 @@ import time
 import unicodedata
 from zoneinfo import ZoneInfo
 
-VERSION = '1.5.0'
+VERSION = '1.6.0'
 RULES = {
  'sisal': ('info@sisal.it', "inviaci la copia del tuo documento d'identità"),
  'pokerstars': ('info@clienti.pokerstars.it', "inviaci il tuo documento d'identità"),
@@ -35,6 +35,9 @@ RULES = {
 }
 LABELS = {'sisal':'Sisal', 'pokerstars':'PokerStars', 'snai':'Snai'}
 EMAIL_RE = re.compile(r'^[a-z0-9.!#$%&\x27*+/=?^_`{|}~-]+@[a-z0-9.-]+\.[a-z]{2,}$', re.I)
+WITHDRAWAL_CHANNEL = 'sisal_withdrawals'
+WITHDRAWAL_SUBJECT = 'la tua richiesta di prelievo è stata inoltrata'
+WITHDRAWAL_SOURCE_SHEETS = {'Sisal Sport', 'Sisal Slot 600'}
 
 def now(): return datetime.now(timezone.utc).isoformat()
 
@@ -176,6 +179,114 @@ class SheetsSource:
     stat['eligible']+=1
    report[source['sheet']]={**dict(stat),'colors':dict(colors)}
   return accounts, report
+
+ def withdrawal_mailboxes(self):
+  """Read only email cells and their colors. No password column is requested."""
+  settings=self.config[WITHDRAWAL_CHANNEL]
+  expected=settings['sources']
+  if (len(expected)!=2 or {s['sheet'] for s in expected}!=WITHDRAWAL_SOURCE_SHEETS
+      or len({s['book'] for s in expected})!=1 or len({s['gid'] for s in expected})!=2):
+   raise ValueError('Withdrawal source configuration is invalid')
+  mailboxes=set(); report={}
+  for spec in expected:
+   book=self.client.open_by_key(spec['book'])
+   meta=book.fetch_sheet_metadata(params={'fields':'properties(spreadsheetTheme),sheets(properties(sheetId,title,gridProperties))'})
+   matches=[s['properties'] for s in meta['sheets'] if s['properties']['title']==spec['sheet'] and s['properties']['sheetId']==spec['gid']]
+   if len(matches)!=1:raise ValueError('Withdrawal source sheet changed')
+   grid=matches[0]['gridProperties'];count=grid['rowCount']
+   if grid['columnCount']<7 or count>self.config.get('max_rows',10000):raise ValueError('Unexpected withdrawal source dimensions')
+   raw=book.fetch_sheet_metadata(params={
+    'ranges':f"'{spec['sheet']}'!G1:G{count}",
+    'fields':'sheets(properties(sheetId),data(startRow,startColumn,rowData(values(formattedValue,effectiveFormat(backgroundColor,backgroundColorStyle)))))'})
+   rows=[]
+   for sheet in raw.get('sheets',[]):
+    if sheet['properties']['sheetId']!=spec['gid']:continue
+    for block in sheet.get('data',[]):
+     if block.get('startColumn')!=6:raise ValueError('Unexpected withdrawal source columns')
+     rows.extend((block.get('startRow',0)+i+1,row.get('values',[])) for i,row in enumerate(block.get('rowData',[])))
+   headers=[number for number,cells in rows if number<=30 and len(cells)==1
+            and normalized(cells[0].get('formattedValue','')) in {'e-mail','email','mail'}]
+   if len(headers)!=1:raise ValueError('Withdrawal source email headers absent or ambiguous')
+   theme={p['colorType']:p['color'].get('rgbColor') for p in meta.get('properties',{}).get('spreadsheetTheme',{}).get('themeColors',[])}
+   summary=collections.Counter()
+   for number,cells in rows:
+    if number<=headers[0] or not cells:continue
+    address=cells[0].get('formattedValue','').strip().lower()
+    if not address:continue
+    if not EMAIL_RE.fullmatch(address) or not address.endswith('@libero.it'):
+     summary['unsupported_email']+=1;continue
+    color=background(cells[0],theme)
+    if not withdrawal_color_allowed(color):summary['excluded_color']+=1;continue
+    mailboxes.add(address);summary['eligible']+=1
+   report[spec['sheet']]=dict(summary)
+  return mailboxes,report
+
+
+def withdrawal_color_allowed(color):
+ if not re.fullmatch(r'#[\da-f]{6}',color):return False
+ r,g,b=(int(color[i:i+2],16) for i in (1,3,5))
+ return not (r>g and r>b and 100*max(g,b)<=45*r and 100*abs(g-b)<=20*r)
+
+
+def withdrawal_id(email,raw):
+ message=BytesHeaderParser(policy=policy.default).parsebytes(raw)
+ from_values=message.get_all('From',[]);subjects=message.get_all('Subject',[])
+ if len(from_values)!=1 or len(subjects)!=1 or normalized(subjects[0])!=WITHDRAWAL_SUBJECT:return None
+ sender=from_values[0]
+ if sender.defects or len(sender.addresses)!=1 or sender.addresses[0].addr_spec.casefold()!='infoclienti@sisal.it':return None
+ ids=message.get_all('Message-ID',[])
+ identifier=str(ids[0]).strip() if len(ids)==1 and len(str(ids[0]))<=512 else ''
+ fingerprint=identifier or hashlib.sha256(raw).hexdigest()
+ return hashlib.sha256(f'withdrawal\n{email}\n{fingerprint}'.encode()).hexdigest()
+
+
+class WithdrawalHTML(HTMLParser):
+ BLOCKS={'br','p','div','tr','table','ul','ol','li','section','article','blockquote','h1','h2','h3','hr'}
+
+ def __init__(self):
+  super().__init__(convert_charrefs=True);self.chunks=[];self.ignored=None
+
+ def handle_starttag(self,tag,attrs):
+  if tag in {'script','style','head'} and self.ignored is None:self.ignored=tag
+  if self.ignored is None and tag in self.BLOCKS:self.chunks.append('\n')
+  if self.ignored is None and tag in {'td','th'}:self.chunks.append(' ')
+
+ def handle_endtag(self,tag):
+  if tag==self.ignored:self.ignored=None
+  elif self.ignored is None and tag in self.BLOCKS:self.chunks.append('\n')
+
+ def handle_data(self,data):
+  if self.ignored is None:self.chunks.append(data)
+
+
+WITHDRAWAL_MONEY=r'(?:[0-9]{1,3}(?:\.[0-9]{3})+|[0-9]+),[0-9]{2}(?![0-9]|[.,][0-9])'
+WITHDRAWAL_AMOUNTS={
+ 'amount_cents':re.compile(rf'\bla\s+tua\s+richiesta\s+di\s+prelievo\s+di\s+€\s*({WITHDRAWAL_MONEY})\s+è\s+stata\s+correttamente\s+inoltrata\b',re.I),
+ 'balance_cents':re.compile(rf'\bil\s+tuo\s+nuovo\s+saldo\s+è\s+di\s+€\s*({WITHDRAWAL_MONEY})',re.I),
+}
+
+
+def withdrawal_values(raw):
+ """Read exact labelled Italian amounts from the message body, never the attachments."""
+ message=BytesParser(policy=policy.default).parsebytes(raw)
+ result={key:set() for key in WITHDRAWAL_AMOUNTS}
+ for mime_type in ('plain','html'):
+  body=message.get_body(preferencelist=(mime_type,))
+  if body is None:continue
+  try:text=body.get_content()
+  except (LookupError,UnicodeError,TypeError):return None
+  if not isinstance(text,str):return None
+  if mime_type=='html':
+   parser=WithdrawalHTML();parser.feed(text);parser.close();text=''.join(parser.chunks)
+  text=unicodedata.normalize('NFC',text)
+  for key,pattern in WITHDRAWAL_AMOUNTS.items():
+   for match in pattern.finditer(text):
+    cents=int(match[1].replace('.','').replace(',',''))
+    if cents>9_007_199_254_740_991:return None
+    result[key].add(cents)
+ if any(len(values)!=1 for values in result.values()):return None
+ amounts={key:next(iter(values)) for key,values in result.items()}
+ return amounts if amounts['amount_cents']>0 else None
 
 VERIFICATION_HOSTS={'sisal':{'areaprivata.sisal.it'},'pokerstars':{'areaprivata-pokerstars.sisal.it'}}
 
@@ -394,6 +505,9 @@ class State:
    CREATE TABLE IF NOT EXISTS followups(request_key TEXT PRIMARY KEY,email TEXT NOT NULL,operator TEXT NOT NULL,request_received TEXT NOT NULL,not_before TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'waiting');
    CREATE TABLE IF NOT EXISTS followup_cursors(request_key TEXT,folder TEXT,validity INTEGER NOT NULL,uid INTEGER NOT NULL,PRIMARY KEY(request_key,folder));
    CREATE TABLE IF NOT EXISTS followup_events(event_key TEXT PRIMARY KEY,request_key TEXT NOT NULL,email TEXT NOT NULL,operator TEXT NOT NULL,subject TEXT NOT NULL,received TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'pending',attempts INTEGER NOT NULL DEFAULT 0,next_try REAL NOT NULL DEFAULT 0,telegram_message_id INTEGER,error TEXT,created TEXT NOT NULL,updated TEXT NOT NULL);
+   CREATE TABLE IF NOT EXISTS withdrawal_subscriptions(email TEXT PRIMARY KEY,active INTEGER NOT NULL,generation INTEGER NOT NULL);
+   CREATE TABLE IF NOT EXISTS withdrawal_cursors(email TEXT,folder TEXT,generation INTEGER NOT NULL,validity INTEGER NOT NULL,uid INTEGER NOT NULL,PRIMARY KEY(email,folder));
+   CREATE TABLE IF NOT EXISTS withdrawal_events(event_key TEXT PRIMARY KEY,email TEXT NOT NULL,amount_cents INTEGER NOT NULL,balance_cents INTEGER NOT NULL,received_at TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'pending',error TEXT,attempts INTEGER NOT NULL DEFAULT 0,next_try REAL NOT NULL DEFAULT 0);
   ''')
   with self.db:
    self.db.execute("UPDATE events SET status='uncertain',error='PROCESS_INTERRUPTED',updated=? WHERE status='sending'",(now(),))
@@ -410,6 +524,32 @@ class State:
     if not active:
      self.db.execute("UPDATE followups SET status='cancelled' WHERE email=? AND operator=? AND status IN ('waiting','queued')",key)
      self.db.execute("UPDATE followup_events SET status='cancelled',updated=? WHERE email=? AND operator=? AND status='pending'",(now(),*key))
+
+ def sync_withdrawals(self,mailboxes):
+  existing={row['email']:row for row in self.db.execute('SELECT * FROM withdrawal_subscriptions')}
+  with self.db:
+   for address in existing.keys() | mailboxes:
+    previous=existing.get(address)
+    active=int(address in mailboxes)
+    generation=previous['generation'] if previous else 0
+    if active and (not previous or not previous['active']):generation+=1
+    self.db.execute('INSERT OR REPLACE INTO withdrawal_subscriptions VALUES(?,?,?)',(address,active,generation))
+
+ def withdrawal_generation(self,email):
+  row=self.db.execute('SELECT generation FROM withdrawal_subscriptions WHERE active=1 AND email=?',(email,)).fetchone()
+  if row is None:raise ValueError('Withdrawal mailbox is not enabled')
+  return row['generation']
+
+ def withdrawal_cursor(self,email,folder):
+  return self.db.execute('SELECT * FROM withdrawal_cursors WHERE email=? AND folder=?',(email,folder)).fetchone()
+
+ def advance_withdrawal(self,email,folder,generation,validity,uid):
+  self.db.execute('INSERT OR REPLACE INTO withdrawal_cursors VALUES(?,?,?,?,?)',(email,folder,generation,validity,uid))
+
+ def enqueue_withdrawal(self,event):
+  cursor=self.db.execute('INSERT OR IGNORE INTO withdrawal_events(event_key,email,amount_cents,balance_cents,received_at) VALUES(?,?,?,?,?)',
+                       (event['event_id'],event['email'],event['amount_cents'],event['balance_cents'],event['received_at']))
+  return cursor.rowcount==1
 
  def generation(self,email,operator):
   return self.db.execute('SELECT activation FROM subscriptions WHERE email=? AND operator=? AND active=1',(email,operator)).fetchone()[0]
@@ -502,7 +642,7 @@ class Scanner:
    for folder in folders:
     try:self.scan_folder(conn,email,operators,folder,stats)
     except Exception as exc:errors.append({'folder':folder,'code':error_code(exc)})
-   for watch in self.state.due_followups(email,operators):
+   for watch in self.state.due_followups(email,operators-{WITHDRAWAL_CHANNEL}):
     for folder in folders:
      if self.state.db.execute('SELECT status FROM followups WHERE request_key=?',(watch['request_key'],)).fetchone()[0]!='waiting':break
      try:self.scan_followup(conn,watch,folder,stats)
@@ -520,9 +660,9 @@ class Scanner:
    return int(data[0])
   validity=response_int('UIDVALIDITY');upper=response_int('UIDNEXT')-1
   if validity<=0 or upper<0:raise ValueError('Invalid UID metadata')
-  tracked={};diffida_tracked={}
+  tracked={};diffida_tracked={};withdrawal_tracked=None
   with self.state.db:
-   for operator in operators:
+   for operator in operators-{WITHDRAWAL_CHANNEL}:
     generation=self.state.generation(email,operator);cursor=self.state.cursor(email,operator,folder)
     if cursor is None or cursor['validity']!=validity or cursor['activation']!=generation:
      self.state.advance(email,operator,folder,generation,validity,upper);stats['baselines']+=1
@@ -533,8 +673,16 @@ class Scanner:
      if dc is None or dc['validity']!=validity or dc['activation']!=generation:
       advance_diffida(self.state,email,operator,folder,generation,validity,upper);stats['diffida_baselines']+=1
      else:diffida_tracked[operator]=(generation,dc['uid'])
-  if not tracked and not diffida_tracked:return
-  low=min(uid for _,uid in [*tracked.values(),*diffida_tracked.values()])+1
+   if WITHDRAWAL_CHANNEL in operators:
+    generation=self.state.withdrawal_generation(email)
+    cursor=self.state.withdrawal_cursor(email,folder)
+    if cursor is None or cursor['generation']!=generation or cursor['validity']!=validity:
+     self.state.advance_withdrawal(email,folder,generation,validity,upper);stats['withdrawal_baselines']+=1
+    else:withdrawal_tracked=(generation,cursor['uid'])
+  cursors=[*tracked.values(),*diffida_tracked.values()]
+  if withdrawal_tracked:cursors.append(withdrawal_tracked)
+  if not cursors:return
+  low=min(uid for _,uid in cursors)+1
   if low>upper:stats['folders_unchanged']+=1;return
   typ,data=conn.uid('SEARCH',None,'UID',f'{low}:{upper}')
   if typ!='OK' or not data or not isinstance(data[0],bytes):raise RuntimeError('SEARCH failed')
@@ -542,6 +690,7 @@ class Scanner:
   uids=[u for u in all_uids if low<=u<=upper]
   cap=self.config.get('max_messages_per_folder',500)
   batch=uids[:cap];target=batch[-1] if len(uids)>cap else upper
+  withdrawal_error=None
   for uid in batch:
    typ,data=conn.uid('FETCH',str(uid),'(UID INTERNALDATE BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE MESSAGE-ID)])')
    if typ!='OK':raise RuntimeError('FETCH failed')
@@ -579,6 +728,17 @@ class Scanner:
        if document_event(email,operator,body,received) is None:raise ValueError('Verification sender mismatch')
        verification[operator]=extract_verification_link(body,operator)
      stats['verification_bodies']+=1
+   event=None
+   if withdrawal_tracked and withdrawal_error is None and uid>withdrawal_tracked[1]:
+    try:
+     key=withdrawal_id(email,raw)
+     if key and not self.state.db.execute('SELECT 1 FROM withdrawal_events WHERE event_key=?',(key,)).fetchone():
+      event=self.withdrawal_payload(conn,email,uid,raw,received)
+      stats['withdrawal_bodies']+=1
+      if event is None:stats['withdrawal_unparsed']+=1
+    except Exception as exc:
+     # Do not lose the withdrawal cursor or block the original document checks.
+     withdrawal_error=exc
    with self.state.db:
     for operator,(generation,cursor_uid) in tracked.items():
      if uid>cursor_uid:
@@ -588,14 +748,45 @@ class Scanner:
      if uid>cursor_uid:
       if enqueue_diffida(self.state,email,operator,raw,received):stats['diffida_candidates']+=1
      advance_diffida(self.state,email,operator,folder,generation,validity,max(cursor_uid,uid))
+    if withdrawal_tracked and withdrawal_error is None:
+     generation,cursor_uid=withdrawal_tracked
+     if event and self.state.enqueue_withdrawal(event):stats['withdrawal_candidates']+=1
+     self.state.advance_withdrawal(email,folder,generation,validity,max(cursor_uid,uid))
    stats['headers']+=1
   with self.state.db:
    for operator,(generation,old_uid) in tracked.items():
     self.state.advance(email,operator,folder,generation,validity,max(old_uid,target))
    for operator,(generation,old_uid) in diffida_tracked.items():
     advance_diffida(self.state,email,operator,folder,generation,validity,max(old_uid,target))
+   if withdrawal_tracked and withdrawal_error is None:
+    generation,old_uid=withdrawal_tracked
+    self.state.advance_withdrawal(email,folder,generation,validity,max(old_uid,target))
   if len(uids)>cap:stats['backlog_folders']+=1
   stats['folders_checked']+=1
+  if withdrawal_error is not None:raise withdrawal_error
+
+ def withdrawal_payload(self,conn,email,uid,headers,received):
+  max_bytes=524288
+  typ,data=conn.uid('FETCH',str(uid),f'(UID RFC822.SIZE BODY.PEEK[]<0.{max_bytes}>)')
+  if typ!='OK':raise RuntimeError('Withdrawal body FETCH failed')
+  literals=[item for item in data if isinstance(item,tuple) and isinstance(item[1],bytes)]
+  if not literals:return None
+  if len(literals)!=1:raise ValueError('Unexpected withdrawal body response')
+  metadata,body=literals[0]
+  actual=re.search(rb'\bUID (\d+)\b',metadata)
+  if not actual or int(actual[1])!=uid:raise ValueError('Withdrawal body UID mismatch')
+  size=re.search(rb'RFC822\.SIZE (\d+)',metadata)
+  if len(body)>=max_bytes or (size and int(size[1])>max_bytes):return None
+  expected=BytesHeaderParser(policy=policy.default).parsebytes(headers)
+  current=BytesHeaderParser(policy=policy.default).parsebytes(body)
+  if any(str(expected.get(key,''))!=str(current.get(key,'')) for key in ('Message-ID','Date','Subject','From')):
+   raise ValueError('Withdrawal message mismatch')
+  event_id=withdrawal_id(email,body)
+  if not event_id:raise ValueError('Withdrawal sender or subject mismatch')
+  amounts=withdrawal_values(body)
+  if amounts is None:return None
+  stamp=received_time(received).isoformat(timespec='milliseconds').replace('+00:00','Z')
+  return {'event_id':event_id,'email':email,'received_at':stamp,**amounts}
 
  def scan_followup(self,conn,watch,folder,stats):
   mailbox='"'+folder.replace('\\','\\\\').replace('"','\\"')+'"'
@@ -774,7 +965,46 @@ def publish_dashboard(config,state,client=None):
  count=max(len(rows),len(previous));payload=rows+[['']*8 for _ in range(count-len(rows))]
  sheet.update(range_name=f'A1:H{count}',values=payload,value_input_option='RAW')
 
-def run_cycle(config,state,source=None,scanner=None,sender=None,sleep=time.sleep,diffida_writer=None):
+def deliver_withdrawals(config,state,client=None):
+ """Retry only the password-free payload until Banco confirms the same event ID."""
+ rows=state.db.execute("SELECT * FROM withdrawal_events WHERE status='pending' AND next_try<=? ORDER BY next_try,received_at,event_key LIMIT 25",(time.time(),)).fetchall()
+ if not rows:return {}
+ if client is None:
+  import requests
+  client=requests
+ target=config.get('dashboard_status',{}).get('webhook_file')
+ if not target:raise ValueError('Withdrawal delivery requires the Banco webhook')
+ bridge=json.loads(Path(target).read_text())
+ url=bridge['url'];parsed=urlsplit(url)
+ if (parsed.scheme!='https' or parsed.netloc!='script.google.com' or parsed.fragment
+     or not re.fullmatch(r'/macros/s/[A-Za-z0-9_-]+/exec',parsed.path)):
+  raise ValueError('Banco webhook address is invalid')
+ query=parse_qsl(parsed.query,keep_blank_values=True)
+ if len(query)!=1 or query[0][0]!='key' or not query[0][1]:raise ValueError('Banco webhook authentication is invalid')
+ stats=collections.Counter()
+ for row in rows:
+  payload={key:row[key] for key in ('email','amount_cents','balance_cents','received_at')}
+  payload['event_id']=row['event_key']
+  status='pending';error=None;attempts=row['attempts']+1
+  try:
+   response=client.post(url,json={'banco_sisal_withdrawal':payload},timeout=(10,45))
+   answer=response.json()
+   outcome=answer.get('status')
+   if (response.status_code==200 and answer.get('ok') is True and answer.get('event_id')==payload['event_id']
+       and outcome in {'written','duplicate','stale','excluded'}):status=outcome
+   else:
+    codes={'unmatched':'WITHDRAWAL_ACCOUNT_UNMATCHED','ambiguous':'WITHDRAWAL_ACCOUNT_AMBIGUOUS',
+           'invalid':'WITHDRAWAL_EVENT_INVALID','busy':'WITHDRAWAL_SHEET_BUSY'}
+    error=codes.get(outcome,'WITHDRAWAL_WRITE_UNCONFIRMED')
+  except Exception as exc:
+   error=error_code(exc)
+  retry=time.time()+min(3600*2**min(attempts-1,4),86400) if error else 0
+  with state.db:state.db.execute('UPDATE withdrawal_events SET status=?,error=?,attempts=?,next_try=? WHERE event_key=?',(status,error,attempts,retry,row['event_key']))
+  stats[status]+=1
+ return dict(stats)
+
+
+def run_cycle(config,state,source=None,scanner=None,sender=None,sleep=time.sleep,diffida_writer=None,withdrawal_client=None):
  if not within_hours(config):return {'status':'outside_operating_hours','errors':[],'started':now(),'finished':now()}
  started=now();rid=state.db.execute('INSERT INTO runs(started) VALUES(?)',(started,)).lastrowid;state.db.commit()
  summary={'version':VERSION,'started':started,'status':'running','errors':[]}
@@ -783,6 +1013,18 @@ def run_cycle(config,state,source=None,scanner=None,sender=None,sleep=time.sleep
   accounts,sheets=source.load();state.sync(accounts);summary['sheets']=sheets
   groups=collections.defaultdict(set)
   for a in accounts:groups[a.email].add(a.operator)
+  withdrawal_config=config.get(WITHDRAWAL_CHANNEL,{})
+  withdrawal_enabled=withdrawal_config.get('enabled') is True
+  if withdrawal_enabled:
+   try:
+    mailboxes,inventory=source.withdrawal_mailboxes()
+    state.sync_withdrawals(mailboxes)
+    for address in mailboxes:groups[address].add(WITHDRAWAL_CHANNEL)
+    summary['withdrawal_sources']=inventory
+    summary['withdrawal_mailboxes']=len(mailboxes)
+   except Exception as exc:
+    summary['errors'].append({'phase':'withdrawal_inventory','code':error_code(exc)})
+  else:state.sync_withdrawals(set())
   summary['eligible_rows']=len(accounts);summary['unique_mailboxes']=len(groups)
   password=Path(config['password_file']).read_text().strip();scanner=scanner or Scanner(config,state)
   aggregate=collections.Counter();failed=[];successful=set()
@@ -805,7 +1047,7 @@ def run_cycle(config,state,source=None,scanner=None,sender=None,sleep=time.sleep
      else:successful.add(email)
     except Exception as exc:retry_errors.append({'mailbox_hash':hashlib.sha256(email.encode()).hexdigest()[:12],'code':error_code(exc)})
     if number+1<len(failed):sleep(random.uniform(2,4))
-   summary['first_attempt_errors']=len(summary['errors']);summary['errors']=retry_errors
+   summary['first_attempt_errors']=len(summary['errors']);summary['errors']=[e for e in summary['errors'] if e.get('phase')=='withdrawal_inventory']+retry_errors
   summary['checked_mailboxes']=len(successful);summary['scan']=dict(aggregate)
   # Re-read current account eligibility before delivering queued alerts.
   if state.db.execute("SELECT 1 FROM events WHERE status='pending' UNION ALL SELECT 1 FROM followup_events WHERE status='pending' LIMIT 1").fetchone():
@@ -819,6 +1061,13 @@ def run_cycle(config,state,source=None,scanner=None,sender=None,sleep=time.sleep
    summary['diffida_delivery']=deliver_diffide(config,state,diffida_writer)
    remaining=pending_diffide(state);pending_problem+=len(remaining)
    summary['errors'].extend({'phase':'diffida_sheet','code':code} for code in sorted({e.get('error','DIFFIDA_WRITE_PENDING') for e in remaining}))
+  if withdrawal_enabled:
+   try:summary['withdrawal_delivery']=deliver_withdrawals(config,state,withdrawal_client)
+   except Exception as exc:summary['errors'].append({'phase':'withdrawal_sheet','code':error_code(exc)})
+   pending_problem+=state.db.execute("SELECT count(*) FROM withdrawal_events WHERE status='pending'").fetchone()[0]
+   summary['errors'].extend({'phase':'withdrawal_sheet','code':row[0]} for row in state.db.execute(
+    "SELECT DISTINCT error FROM withdrawal_events WHERE status='pending' AND error IS NOT NULL ORDER BY error"))
+   if aggregate.get('withdrawal_unparsed'):summary['errors'].append({'phase':'withdrawal_parse','code':'WITHDRAWAL_BODY_UNRECOGNIZED'})
   summary['reactivation_waits']=dict(state.db.execute('SELECT status,COUNT(*) FROM followups GROUP BY status').fetchall())
   issues=sum(sum(v.get(key,0) for key in ['color_discordance','invalid_or_unsupported_email','missing_password','password_mismatch','missing_name']) for v in sheets.values())
   summary['configuration_issues']=issues;summary['delivery_issues']=pending_problem
@@ -895,7 +1144,13 @@ def main():
   result,mid,_,_=Telegram(config).send('✅ Prova monitor mail documenti riuscita. Questo messaggio verifica soltanto Telegram; nessuna vecchia email è stata notificata.')
   print(json.dumps({'result':result,'message_id':mid}));return 0 if result=='sent' else 1
  if args.command=='inventory':
-  accounts,report=SheetsSource(config).load();print(json.dumps({'sheets':report,'unique_mailboxes':len({a.email for a in accounts}),'eligible_rows':len(accounts)},ensure_ascii=False));return 0
+  source=SheetsSource(config)
+  accounts,report=source.load()
+  result={'sheets':report,'unique_mailboxes':len({a.email for a in accounts}),'eligible_rows':len(accounts)}
+  if config.get(WITHDRAWAL_CHANNEL,{}).get('enabled') is True:
+   mailboxes,inventory=source.withdrawal_mailboxes()
+   result.update(withdrawal_sources=inventory,withdrawal_mailboxes=len(mailboxes))
+  print(json.dumps(result,ensure_ascii=False));return 0
  if args.command=='status':
   state=object.__new__(State)
   state.db=sqlite3.connect('file:'+str(Path(config['db_file']).resolve())+'?mode=ro',uri=True,timeout=30)
