@@ -73,6 +73,31 @@ registro originale: il rollback alla v1.0.0 conserva questi dati e sospende
 la funzione di riattivazione. Non vengono aperte attese retroattive per
 richieste documento già notificate prima dell'introduzione della funzione.
 
+## Richieste di prelievo Sisal
+
+La configurazione facoltativa `sisal_withdrawals` abilita un controllo separato
+per Sisal Sport e Sisal Slot 600. Il primo ciclo di una casella registra il
+cursore corrente. Esclusione e successivo rientro della casella e cambiamento
+di UIDVALIDITY iniziano da un nuovo cursore. Il normale calendario del monitor
+vale anche per il prelievo. Le regole delle richieste documenti non cambiano.
+
+Il nuovo inventario legge soltanto la colonna E-mail e il suo colore. Le caselle
+Libero non rosse vengono aperte con la credenziale IMAP già configurata. Gli
+errori di accesso seguono il normale percorso del monitor. La password
+dell'account Sisal resta nell'ambiente Google Sheets.
+Le mail necessitano di mittente `infoclienti@sisal.it`, oggetto `La tua richiesta
+di prelievo è stata inoltrata` e le due frasi confermate. Il corpo viene letto
+in sola lettura su corrispondenza dell'intestazione. Si conservano soltanto
+identificativo, mail, data IMAP, importi in centesimi e stato di consegna.
+Corpi sconosciuti o ambigui generano un codice di errore senza registrare il testo.
+
+Servono entrambe le schede configurate con book e gid corretti, il ricevitore
+Sisal active installato e `dashboard_status.webhook_file` già configurato.
+Il webhook riceve `banco_sisal_withdrawal` con `email`, `event_id`, `received_at`,
+`amount_cents`, `balance_cents`. Un evento resta in attesa se la risposta non
+conferma lo stesso ID e uno stato fra `written`, `duplicate`, `stale`, `excluded`.
+`inventory` mostra conteggi separati per il nuovo controllo e senza indirizzi.
+
 ## Separazione di sorgenti e dati
 
 - Qui sono tracciati programma, launcher, timer, gestione release e test.

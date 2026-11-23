@@ -3,6 +3,20 @@ from pathlib import Path
 from unittest.mock import Mock,patch
 import email_monitor as m
 
+
+def withdrawal_mail(sender='infoclienti@sisal.it',subject='La tua richiesta di prelievo è stata inoltrata',
+                    amount='123,45',balance='67,89',html=False,extra=''):
+ from email.message import EmailMessage
+ msg=EmailMessage()
+ msg['From']=sender;msg['Subject']=subject;msg['Message-ID']='<withdrawal@fixture.test>'
+ if html:
+  msg.set_content(f'<p>La tua richiesta di &nbsp;prelievo di <b>€ {amount}</b><br>è stata correttamente inoltrata</p>'
+                  f'<p>Il tuo nuovo <strong>saldo</strong> è di &euro; {balance}.</p>{extra}',subtype='html')
+ else:
+  msg.set_content(f'La tua richiesta di prelievo di € {amount} è stata correttamente inoltrata\n'
+                  f'Il tuo nuovo saldo è di € {balance}.\n{extra}')
+ return msg.as_bytes()
+
 CONFIG={'allowed_colors':['#ffffff','#ff00ff','#9900ff'],'max_messages_per_folder':500,'imap_domains':['libero.it'],'max_rows':10000}
 ACCOUNT=m.Account('sisal','test@libero.it','Persona Test','book','Sisal Sport',10,12,'stable')
 def raw(sender='info@sisal.it',subject="Inviaci la copia del tuo documento d'identità",mid='<one@test>'):
@@ -28,6 +42,125 @@ class FakeIMAP:
   uid=int(args[0])
   if uid==self.fail_uid:return 'NO',[]
   return 'OK',[(f'1 (UID {uid} INTERNALDATE "02-Oct-2026 12:30:00 +0000" BODY[HEADER.FIELDS] {{100}}'.encode(),self.messages[uid]),b')']
+
+
+class SisalWithdrawalTest(unittest.TestCase):
+ def setUp(self):
+  self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
+  self.root=Path(self.temp.name)
+  self.state=m.State(self.root/'state.sqlite3');self.addCleanup(self.state.db.close)
+  self.state.sync([ACCOUNT]);self.state.sync_withdrawals({ACCOUNT.email})
+  self.operator={m.WITHDRAWAL_CHANNEL}
+
+ def scan(self,imap,operators=None):
+  return m.Scanner(CONFIG,self.state,lambda:imap).scan(ACCOUNT.email,operators or self.operator,'test-password')
+
+ def queued(self):
+  return self.state.db.execute('SELECT * FROM withdrawal_events ORDER BY event_key').fetchall()
+
+ def test_exact_subject_sender_and_email_scope(self):
+  self.assertIsNotNone(m.withdrawal_id(ACCOUNT.email,withdrawal_mail(sender='Sisal <infoclienti@sisal.it>')))
+  for body in (withdrawal_mail(sender='info@sisal.it'),withdrawal_mail(sender='infoclienti@sisal.it.example.test'),
+               withdrawal_mail(subject='Re: La tua richiesta di prelievo è stata inoltrata')):
+   self.assertIsNone(m.withdrawal_id(ACCOUNT.email,body))
+  self.assertNotEqual(m.withdrawal_id(ACCOUNT.email,withdrawal_mail()),m.withdrawal_id('different@libero.it',withdrawal_mail()))
+
+ def test_exact_plain_and_html_phrase_amounts_and_zero_balance(self):
+  for html in [False,True]:
+   self.assertEqual(m.withdrawal_values(withdrawal_mail(html=html)),{'amount_cents':12345,'balance_cents':6789})
+   self.assertEqual(m.withdrawal_values(withdrawal_mail(amount='1.234,56',balance='0,00',html=html)),
+                    {'amount_cents':123456,'balance_cents':0})
+
+ def test_invalid_or_conflicting_amount_is_never_guessed(self):
+  for body in (withdrawal_mail(amount='123.45'), withdrawal_mail(amount='0,00'),
+               withdrawal_mail(balance='negative'),withdrawal_mail(balance='87,999'),
+               withdrawal_mail(extra='Il tuo nuovo saldo è di € 987,65.')):
+   self.assertIsNone(m.withdrawal_values(body))
+
+ def test_existing_document_cursor_does_not_backfill_withdrawal_channel(self):
+  with self.state.db:self.state.advance(ACCOUNT.email,'sisal','INBOX',1,1,3)
+  session=FakeIMAP(uidnext=6,messages={5:withdrawal_mail()})
+  stats,errors=self.scan(session,{'sisal',*self.operator})
+  self.assertEqual(errors,[]);self.assertEqual(stats['withdrawal_baselines'],2)
+  self.assertEqual(self.queued(),[])
+  self.assertFalse(any(call[0]=='FETCH' and 'BODY.PEEK[]' in call[-1] for call in session.calls))
+
+ def test_new_withdrawal_is_deduplicated_without_body_or_password_persisted(self):
+  self.scan(FakeIMAP(uidnext=5))
+  session=FakeIMAP(uidnext=6,messages={5:withdrawal_mail(extra='private-body-only')})
+  stats,errors=self.scan(session)
+  self.assertEqual(errors,[]);self.assertEqual(stats['withdrawal_candidates'],1)
+  event,=self.queued()
+  self.assertEqual(event['received_at'],'2026-10-02T12:30:00.000Z')
+  self.assertEqual(event['amount_cents'],12345);self.assertEqual(event['balance_cents'],6789)
+  self.assertNotIn('private-body-only',repr(dict(event)));self.assertNotIn('test-password',repr(dict(event)))
+  self.assertEqual(sum(call[0]=='FETCH' and 'BODY.PEEK[]' in call[-1] for call in session.calls),1)
+  self.assertTrue(all(call[-1] is True for call in session.calls if call[0]=='SELECT'))
+
+ def test_reactivated_mailbox_does_not_backfill_exclusion_period(self):
+  self.scan(FakeIMAP(uidnext=5));self.state.sync_withdrawals(set());self.state.sync_withdrawals({ACCOUNT.email})
+  self.scan(FakeIMAP(uidnext=6,messages={5:withdrawal_mail()}))
+  self.assertEqual(self.queued(),[])
+
+ def test_withdrawal_fetch_error_preserves_cursor_but_documents_continue(self):
+  class WithdrawalFetchError(FakeIMAP):
+   def uid(self,cmd,*args):
+    if cmd=='FETCH' and args[0]=='5' and 'BODY.PEEK[]' in args[-1]:return 'NO',[]
+    return super().uid(cmd,*args)
+  self.scan(FakeIMAP(uidnext=5),{'sisal',*self.operator})
+  _,errors=self.scan(WithdrawalFetchError(uidnext=7,messages={5:withdrawal_mail(),6:raw()}),{'sisal',*self.operator})
+  self.assertTrue(errors);self.assertEqual(self.queued(),[])
+  self.assertEqual(self.state.withdrawal_cursor(ACCOUNT.email,'INBOX')['uid'],4)
+  self.assertEqual(self.state.cursor(ACCOUNT.email,'sisal','INBOX')['uid'],6)
+  self.assertEqual(self.state.db.execute('SELECT COUNT(*) FROM events').fetchone()[0],1)
+
+ def test_only_verified_responses_clear_pending_and_backoff_is_durable(self):
+  self.scan(FakeIMAP(uidnext=5))
+  self.scan(FakeIMAP(uidnext=6,messages={5:withdrawal_mail()}))
+  event,=self.queued();event_id=event['event_key']
+  path=self.root/'webhook.json';path.write_text(json.dumps({'url':'https://script.google.com/macros/s/fixture/exec?key=fixture-key'}))
+  config={'dashboard_status':{'webhook_file':path}}
+  client=Mock();client.post.return_value.status_code=200
+  client.post.return_value.json.return_value={'ok':False,'status':'ambiguous','details':'never store this'}
+  with patch.object(m.time,'time',return_value=10):
+   self.assertEqual(m.deliver_withdrawals(config,self.state,client),{'pending':1})
+   self.assertEqual(m.deliver_withdrawals(config,self.state,client),{})
+  self.assertEqual(client.post.call_count,1)
+  self.assertEqual(self.queued()[0]['error'],'WITHDRAWAL_ACCOUNT_AMBIGUOUS')
+  payload=client.post.call_args.kwargs['json']['banco_sisal_withdrawal']
+  self.assertEqual(set(payload),{'event_id','email','amount_cents','balance_cents','received_at'})
+  client.post.return_value.json.return_value={'ok':True,'status':'duplicate','event_id':event_id}
+  with patch.object(m.time,'time',return_value=3611):
+   self.assertEqual(m.deliver_withdrawals(config,self.state,client),{'duplicate':1})
+  self.assertEqual(self.queued()[0]['status'],'duplicate')
+
+ def test_inventory_reads_only_email_and_its_color(self):
+  def cell(text,rgb):
+   return {'formattedValue':text,'effectiveFormat':{'backgroundColor':dict(zip(('red','green','blue'),rgb))}}
+  def metadata(*,params):
+   gid=10 if "'Sisal Sport'" in params.get('ranges','') else 20
+   if 'ranges' not in params:
+    return {'sheets':[{'properties':{'sheetId':i,'title':title,'gridProperties':{'rowCount':1000,'columnCount':26}}}
+                     for i,title in [(10,'Sisal Sport'),(20,'Sisal Slot 600')]]}
+   self.assertIn('!G1:G1000',params['ranges'])
+   return {'sheets':[{'properties':{'sheetId':gid},'data':[{'startRow':7,'startColumn':6,'rowData':[{'values':pair} for pair in [
+    [cell('E-mail',(1,1,1))],
+    [cell(f'cyan{gid}@libero.it',(0,1,1))],
+    [cell(f'red{gid}@libero.it',(1,0,0))],
+    [cell(f'dark{gid}@libero.it',(.6,0,0))],
+    [cell(f'other{gid}@inwind.it',(1,1,1))],
+    [cell(f'white{gid}@libero.it',(1,1,1))],
+   ]]}]}]}
+  source=m.SheetsSource.__new__(m.SheetsSource)
+  source.config={m.WITHDRAWAL_CHANNEL:{'sources':[
+   {'book':'fixture','gid':10,'sheet':'Sisal Sport'},{'book':'fixture','gid':20,'sheet':'Sisal Slot 600'}]}}
+  client=Mock();client.open_by_key.return_value.fetch_sheet_metadata.side_effect=metadata;source.client=client
+  addresses,inventory=source.withdrawal_mailboxes()
+  self.assertEqual(addresses,{'cyan10@libero.it','cyan20@libero.it','white10@libero.it','white20@libero.it'})
+  self.assertTrue(all(s=={'eligible':2,'excluded_color':2,'unsupported_email':1}
+                      for s in inventory.values()))
+  self.assertNotIn('test-password',repr(inventory));self.assertNotIn('@',repr(inventory))
+
 
 class StateTest(unittest.TestCase):
  def setUp(self):

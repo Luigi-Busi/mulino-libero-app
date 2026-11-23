@@ -14,6 +14,13 @@
   "retry_seconds": 120,
   "max_messages_per_folder": 500,
   "max_rows": 10000,
+  "sisal_withdrawals": {
+    "enabled": false,
+    "sources": [
+      {"book":"ID_FILE_PRINCIPALE","sheet":"Sisal Sport","gid":"ID_SCHEDA_SISAL"},
+      {"book":"ID_FILE_PRINCIPALE","sheet":"Sisal Slot 600","gid":"ID_SCHEDA_SISAL_SLOT_600"}
+    ]
+  },
   "sources": [
     {"book":"ID_FILE_PRINCIPALE","sheet":"Sisal Sport","gid":"ID_SCHEDA_SISAL","operator":"sisal"},
     {"book":"ID_FILE_PRINCIPALE","sheet":"PokerStars","gid":"ID_SCHEDA_POKERSTARS","operator":"pokerstars"}
