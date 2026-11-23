@@ -24,4 +24,9 @@ La pubblicazione Apps Script 47 integra il ricevitore sul deployment esistente
 (precedente 46). Le prove locali si eseguono con `node tests/sisal-active.test.cjs`
 o con la suite `test_emailmatcher.py`. Il ricevitore pubblicato è stato anche
 verificato respingendo un evento incompleto senza scrivere righe.
-Il monitor ha una sua release indipendente sul ramo del monitor.
+Il monitor usa il tag `email-monitor-v1.6.0` con le due sorgenti abilitate
+in `sisal_withdrawals`. La nuova selezione legge solo G e il colore effettivo.
+Per aprire le caselle usa l'autenticazione Libero già configurata.
+Il monitor controlla le caselle una volta l'ora tra le 08:00 e le 21:00 in Italia.
+Il primo accesso riuscito stabilisce il cursore iniziale di ciascuna casella
+e cartella. La funzione registra i prelievi ricevuti dopo quel punto.
