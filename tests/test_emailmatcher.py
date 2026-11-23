@@ -35,6 +35,9 @@ class EmailMatcherTests(unittest.TestCase):
     def test_betsson_integration(self):
         self.run_node_suite("betsson.test.cjs")
 
+    def test_sisal_active_integration(self):
+        self.run_node_suite("sisal-active.test.cjs")
+
 
 if __name__ == "__main__":
     unittest.main()
